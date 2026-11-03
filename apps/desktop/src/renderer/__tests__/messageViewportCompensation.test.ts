@@ -181,6 +181,8 @@ describe('restored reading position handoff through MessageStream.handleScroll',
       jumpDownIdleTimerRef: { current: null },
       saveScrollSnapshot: vi.fn(), clearChipJumpSuppression: vi.fn(),
       setIsNearBottom: vi.fn(), setUnreadKeys: vi.fn(), setShowJumpDown: vi.fn(),
+      // The production handler delegates jump-button state to this hook callback.
+      updateJumpDown: vi.fn(),
       setFirstVisibleItemKey: vi.fn(), setAnchoredForwardItems: vi.fn(),
       unpinAutoFollowForUserUpIntent: vi.fn(), bumpSendFollowCancelGeneration: vi.fn(),
       finishProgrammaticScroll: vi.fn(), refreshViewportAnchor: vi.fn(),
@@ -201,10 +203,12 @@ describe('restored reading position handoff through MessageStream.handleScroll',
     expect(bindings.clearChipJumpSuppression).toHaveBeenCalledOnce();
     expect(bindings.saveScrollSnapshot).toHaveBeenCalled();
     expect(bindings.isNearBottomRef.current).toBe(false);
+    expect(bindings.updateJumpDown).toHaveBeenLastCalledWith(400, false);
     state.top = 3400; // keep scrolling down to the end of the conversation
     scroll();
     expect(bindings.isNearBottomRef.current).toBe(true);
     expect(bindings.setIsNearBottom).toHaveBeenLastCalledWith(true);
+    expect(bindings.updateJumpDown).toHaveBeenLastCalledWith(2800, true);
   });
 
   it('keeps restoring when the layout moved under the anchor', () => {
