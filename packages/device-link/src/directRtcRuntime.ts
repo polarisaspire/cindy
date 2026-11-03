@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 import { MAX_FRAME_BYTES } from './protocol.js';
 import type { DirectRuntime, DirectRuntimeEvents, DirectRuntimeSession } from './directNegotiation.js';
+import { filterDirectSdp, isBlockedDirectAddress } from './directCandidatePolicy.js';
 
 /** Data-only WebRTC, shared by Electron and the isolated Mobile WebView. No STUN/TURN:
  * host candidates try the LAN, and the existing authenticated relay is the fallback.
@@ -14,6 +15,8 @@ export function createDirectRtcRuntime(): DirectRuntime {
     let parts: Uint8Array[] = [];
     let receiveTimer: ReturnType<typeof setTimeout> | undefined;
     let bufferTimer: ReturnType<typeof setTimeout> | undefined;
+    let disconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let iceTransport: RTCIceTransport | undefined;
     const encoder = new TextEncoder();
     const decoder = new TextDecoder('utf-8', { fatal: true });
     const close = () => {
@@ -21,10 +24,24 @@ export function createDirectRtcRuntime(): DirectRuntime {
       closed = true;
       clearTimeout(receiveTimer);
       clearTimeout(bufferTimer);
+      clearTimeout(disconnectTimer);
+      if (iceTransport) iceTransport.onselectedcandidatepairchange = null;
       parts = [];
       dc?.close();
       pc.close();
       events.closed();
+    };
+    const selectedPathAllowed = () => {
+      try {
+        const ice = pc.sctp?.transport.iceTransport;
+        // Older WebViews retain SDP filtering and the existing ACK fallback.
+        if (!ice || typeof ice.getSelectedCandidatePair !== 'function') return true;
+        const pair = ice.getSelectedCandidatePair();
+        // Address visibility is browser-controlled: mDNS/redacted values remain
+        // eligible. Never treat API availability as proof every IP is exposed.
+        return !!pair && ![pair.local.address, pair.local.relatedAddress,
+          pair.remote.address, pair.remote.relatedAddress].some(isBlockedDirectAddress);
+      } catch { return false; }
     };
     const scheduleBufferReport = () => {
       if (!closed && dc && dc.bufferedAmount > 0 && !bufferTimer) {
@@ -46,7 +63,16 @@ export function createDirectRtcRuntime(): DirectRuntime {
       dc.binaryType = 'arraybuffer';
       // Always report the final zero, including messages smaller than a low-water mark.
       dc.bufferedAmountLowThreshold = 0;
-      dc.onopen = () => { if (!closed) events.open(); };
+      dc.onopen = () => {
+        if (closed) return;
+        iceTransport = pc.sctp?.transport.iceTransport;
+        if (iceTransport && typeof iceTransport.getSelectedCandidatePair === 'function') {
+          iceTransport.onselectedcandidatepairchange = () => { if (!selectedPathAllowed()) close(); };
+        }
+        // mDNS/peer-reflexive addresses may only become visible after ICE.
+        if (!selectedPathAllowed()) { close(); return; }
+        events.open();
+      };
       dc.onclose = close;
       dc.onerror = close;
       dc.onbufferedamountlow = () => {
@@ -56,6 +82,7 @@ export function createDirectRtcRuntime(): DirectRuntime {
       };
       dc.onmessage = ({ data }) => {
         try {
+          if (!selectedPathAllowed()) { close(); return; }
           if (closed || !(data instanceof ArrayBuffer) || data.byteLength < 2 || data.byteLength > 16 * 1024) throw new Error();
           const frame = new Uint8Array(data);
           if (frame[0] !== 0 && frame[0] !== 1) throw new Error();
@@ -75,7 +102,17 @@ export function createDirectRtcRuntime(): DirectRuntime {
     };
     pc.ondatachannel = ({ channel }) => bind(channel);
     pc.onconnectionstatechange = () => {
-      if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) close();
+      if (closed) return;
+      if (pc.connectionState === 'disconnected') {
+        // ICE can recover from a brief route change. Do not extend the deadline
+        // on repeated events; reliable ACK timeouts may still fall back sooner.
+        disconnectTimer ??= setTimeout(close, 2_000);
+      } else if (pc.connectionState === 'connected') {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = undefined;
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        close();
+      }
     };
     const gather = async (description: RTCSessionDescriptionInit): Promise<string> => {
       await pc.setLocalDescription(description);
@@ -87,7 +124,7 @@ export function createDirectRtcRuntime(): DirectRuntime {
         changed();
       });
       if (closed || !pc.localDescription?.sdp) throw new Error('DIRECT_CHANNEL_CLOSED');
-      return pc.localDescription.sdp;
+      return filterDirectSdp(pc.localDescription.sdp);
     };
     return {
       async offer() {
@@ -95,12 +132,13 @@ export function createDirectRtcRuntime(): DirectRuntime {
         return gather(await pc.createOffer());
       },
       async accept(sdp) {
-        await pc.setRemoteDescription({ type: 'offer', sdp });
+        await pc.setRemoteDescription({ type: 'offer', sdp: filterDirectSdp(sdp) });
         return gather(await pc.createAnswer());
       },
-      async answer(sdp) { await pc.setRemoteDescription({ type: 'answer', sdp }); },
+      async answer(sdp) { await pc.setRemoteDescription({ type: 'answer', sdp: filterDirectSdp(sdp) }); },
       send(text) {
         if (closed || dc?.readyState !== 'open') throw new Error('DIRECT_CHANNEL_CLOSED');
+        if (!selectedPathAllowed()) { close(); throw new Error('DIRECT_CHANNEL_CLOSED'); }
         const bytes = encoder.encode(text);
         if (!bytes.length || bytes.length > MAX_FRAME_BYTES || dc.bufferedAmount > 3 * MAX_FRAME_BYTES) throw new Error('DIRECT_CHANNEL_BACKPRESSURE');
         try {

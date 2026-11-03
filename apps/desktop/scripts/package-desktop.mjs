@@ -48,7 +48,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureBinary } from '../../../scripts/ensure-agent-binaries.mjs';
 import { desktopClientBuildEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
-import { desktopLogUploadBuildEnv } from '../../../scripts/shared/log-upload-build-env.mjs';
+import { desktopPackageLogUploadBuildEnv } from '../../../scripts/shared/log-upload-build-env.mjs';
 import {
   DESKTOP_ROOT,
   RELEASE_DIR,
@@ -200,7 +200,10 @@ function runForgeMake({ platform, arch, region, version, versionless, noSign, we
     // 版本无关 / 开源打包(versionless):配置文件是 gitignore 的、默认 checkout 里不存在,
     // 允许缺失 ⇒ 注入空目标、功能整体关闭,拉仓即可打包(2026-08-04 review P1)。
     // 注意 allowMissing 只放宽「文件缺失」;文件在但内容损坏两种模式都仍然硬失败。
-    ...desktopLogUploadBuildEnv({ authRegion: region, allowMissing: versionless }),
+    // A build-pinned fork feed is an explicit personal distribution. It must not
+    // require, inherit, or upload to the official private telemetry destination.
+    ...desktopPackageLogUploadBuildEnv({ authRegion: region, versionless,
+      forkUpdateRepository: process.env.CINDY_FORK_UPDATE_REPOSITORY ?? '' }),
     // forge.config.ts 的 NSIS appId / AUMID 优先读这个(与 VITE_ 同源,双保险)。
     CINDY_AUTH_REGION: region,
     // forge.config.ts 注入 packagerConfig.appVersion;版本无关时为占位 0.0.0。
