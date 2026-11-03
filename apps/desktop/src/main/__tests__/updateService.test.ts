@@ -30,6 +30,14 @@ const appGetPath = vi.fn((name: string) => {
   return TEST_ROOT;
 });
 const fetchManifest = vi.fn();
+const forkRepository = vi.fn(() => '');
+const fetchForkAppManifest = vi.fn();
+vi.mock('../forkAppUpdateSource', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../forkAppUpdateSource')>(),
+  getForkUpdateRepository: forkRepository,
+  getForkUpdateBaseUrl: () => `https://github.com/${forkRepository()}/releases/download`,
+  fetchForkAppManifest,
+}));
 const getBaseUrl = vi.fn(() => CDN_EXTERNAL_BASE_URL);
 const isDev = vi.fn(() => false);
 const syncWindowsVersionAfterUpdate = vi.fn(async () => undefined);
@@ -255,6 +263,8 @@ beforeEach(() => {
     return TEST_ROOT;
   });
   fetchManifest.mockReset();
+  forkRepository.mockReturnValue('');
+  fetchForkAppManifest.mockReset();
   getBaseUrl.mockReset();
   getBaseUrl.mockReturnValue(CDN_EXTERNAL_BASE_URL);
   isDev.mockReset();
@@ -300,6 +310,83 @@ afterEach(() => {
 });
 
 describe.sequential('updateService', () => {
+// Fork update design: public startup/Agent/Settings entries must never install
+// official app metadata or auto-restart a fork with an inherited idle setting.
+// The official-only suite lacks this source boundary. Minimum input: fork build
+// with autoRelaunchOnIdle=true and a newer personal manifest. Tier: unit.
+// Measured full existing suite: 7.35 s tests; new scenario: 1.13 s. Reuses the
+// existing reset fixture once, without adding a per-case module reset helper.
+describe('fork application updates', () => {
+  it('isolates app downloads and requires confirmation at startup and idle boundaries', async () => {
+    forkRepository.mockReturnValue('polarisaspire/cindy');
+    appGetVersion.mockReturnValue('1.0.2');
+    const manifest = { forkRepository: 'polarisaspire/cindy', platformKey: 'win32-x64', sourceCommit: 'a'.repeat(40),
+      app: { version: '1.0.3', hotfix: { file: 'personal-123/cindy-1.0.3-hotfix.zip', sha256: 'b'.repeat(64), size: 12 } } };
+    fetchForkAppManifest.mockResolvedValue(manifest);
+    fetchManifest.mockResolvedValue(updateManifest('9.0.0'));
+    download.mockImplementation(async ({ targetPath }: { targetPath: string }) => {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, 'update');
+      return { path: targetPath, size: 12 };
+    });
+    const service = await freshUpdateService('win32', 'x64');
+    service.initUpdateService();
+    try {
+      expect(await service.checkAppUpdateForAgent()).toMatchObject({ status: 'available', targetVersion: '1.0.3' });
+      expect(await service.checkForUpdate(updateManifest('9.0.0'))).toBe('manifest_failed');
+      expect(download).not.toHaveBeenCalled();
+      // An old official patch with the same future version cannot be revived
+      // when the fork feed is unavailable, even with shared application data.
+      fs.mkdirSync(path.join(TEST_USER_DATA, 'updates'), { recursive: true });
+      fs.writeFileSync(path.join(TEST_USER_DATA, 'updates', 'official.zip'), 'official');
+      fs.writeFileSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'), JSON.stringify({ version: '1.0.3', fileName: 'official.zip', sha256: 'a'.repeat(64) }));
+      fetchForkAppManifest.mockResolvedValueOnce(null);
+      expect(await ipcHandlers.get('update-check-startup')?.()).toMatchObject({ hasUpdate: false, action: 'none', error: 'manifest_failed' });
+      expect(download).not.toHaveBeenCalled();
+      expect(await ipcHandlers.get('update-check-startup')?.()).toMatchObject({ hasUpdate: true, action: 'none', version: '1.0.3' });
+      expect(download).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://github.com/polarisaspire/cindy/releases/download/personal-123/cindy-1.0.3-hotfix.zip' }));
+      // Official metadata still refreshes engine observers, but its app9.0.0
+      // must never become this fork's update target or download base.
+      expect(fetchManifest).toHaveBeenCalled();
+      expect(service.readAutoRelaunchOnIdleForAgent()).toBe(false);
+      expect(service.setAutoRelaunchOnIdleForAgent(true)).toBe(false);
+      expect(ipcHandlers.get('update-auto-settings-get')?.()).toMatchObject({ autoRelaunchOnIdle: false, defaultAutoRelaunchOnIdle: false });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ipcHandlers.get('update-relaunch-auto')?.({}, 'dark')).toMatchObject({ accepted: false, blockReason: 'disabled' });
+      expect(spawnProcess).not.toHaveBeenCalled();
+      expect(service.isUpdateRelaunchImminent()).toBe(false);
+      const beforeRelaunch = vi.fn(async () => false);
+      expect(await service.applyConfirmedAppUpdateForAgent({ expectedVersion: '1.0.3', beforeRelaunch })).toMatchObject({ errorCode: 'relaunch_cancelled' });
+      expect(beforeRelaunch).toHaveBeenCalledOnce();
+      expect(service.getUpdateStatus()).toBe('ready');
+      // The explicit confirmed entry must still reach the existing Windows
+      // executor; fake the child and exit so no installed application is run.
+      const resourcesPath = path.join(TEST_ROOT, 'resources');
+      fs.mkdirSync(resourcesPath, { recursive: true });
+      fs.writeFileSync(path.join(resourcesPath, 'cindy-updater.exe'), 'updater');
+      const resourcesDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath');
+      Object.defineProperty(process, 'resourcesPath', { value: resourcesPath, configurable: true });
+      const tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue(TEST_ROOT);
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+      const childListeners = new Map<string, (...args: unknown[]) => void>();
+      spawnProcess.mockImplementationOnce(() => ({ unref: vi.fn(), on: vi.fn((event: string, listener: (...args: unknown[]) => void) => { childListeners.set(event, listener); }) }));
+      try {
+        const confirmed = service.applyConfirmedAppUpdateForAgent({ expectedVersion: '1.0.3', beforeRelaunch: async () => true });
+        await vi.waitFor(() => expect(childListeners.has('spawn')).toBe(true));
+        childListeners.get('spawn')?.();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(await confirmed).toMatchObject({ status: 'relaunching', targetVersion: '1.0.3' });
+        expect(spawnProcess).toHaveBeenCalledOnce();
+        expect(exitSpy).toHaveBeenCalledOnce();
+      } finally {
+        tmpdirSpy.mockRestore();
+        exitSpy.mockRestore();
+        if (resourcesDescriptor) Object.defineProperty(process, 'resourcesPath', resourcesDescriptor);
+        else Reflect.deleteProperty(process, 'resourcesPath');
+      }
+    } finally { service.stopUpdateService(); }
+  });
+});
 describe('installation version repair scope', () => {
   it.each(['darwin', 'linux'] as const)('does not add metadata work to %s startup', async (platform) => {
     const service = await freshUpdateService(platform);

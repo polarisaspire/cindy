@@ -61,6 +61,10 @@ export default defineConfig(({ mode }) => {
       // 目标后注入。dev server / 未注入 ⇒ 空串 ⇒ 运行时判「未配置」、功能整体关闭。
       // ⚠️ main 侧必须写成完整的 `process.env.XDT_LOG_UPLOAD_TARGET` 才能被本 define 文本替换,
       // 见 main/log-upload/logUploadTarget.ts 的 injectedRaw()。
+      // Main-only build-pinned app feed; official builds leave this empty.
+      'process.env.CINDY_FORK_UPDATE_REPOSITORY': JSON.stringify(
+        readMainEnvPreservingEmpty('CINDY_FORK_UPDATE_REPOSITORY'),
+      ),
       'process.env.XDT_LOG_UPLOAD_TARGET': JSON.stringify(readMainEnv('XDT_LOG_UPLOAD_TARGET')),
       // Triage bot token (dev only — production 留空，BotTokenStore 走 safeStorage)
       'process.env.TRIAGE_BOT_TOKEN': JSON.stringify(readMainEnv('TRIAGE_BOT_TOKEN')),

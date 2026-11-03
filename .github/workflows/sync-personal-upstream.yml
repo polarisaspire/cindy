@@ -1,0 +1,68 @@
+name: Sync personal Cindy from upstream
+
+on:
+  schedule:
+    - cron: '23 20 * * *' # Daily 04:23 Asia/Shanghai; GitHub may delay scheduled runs.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: personal-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout the maintained repair branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: fix/direct-link-stability
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_SYNC_TOKEN || github.token }}
+      - name: Merge upstream with DCO; stop on conflicts
+        id: merge
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.PERSONAL_SYNC_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add official https://github.com/makecindy/cindy.git
+          git fetch --no-tags official main
+          if git merge-base --is-ancestor official/main HEAD; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git merge --no-ff --signoff --no-edit official/main
+          if [[ "$HAS_SYNC_TOKEN" != 'true' ]] && ! git diff --quiet HEAD^ HEAD -- .github/workflows/; then
+            echo '::error::Upstream changes workflow files. Configure PERSONAL_SYNC_TOKEN with Contents and Workflows read/write for this fork, then rerun. Nothing was pushed.'
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/fix/direct-link-stability
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      # GitHub deliberately does not trigger push workflows for GITHUB_TOKEN pushes.
+      - name: Dispatch tests and packaging for the merged branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_SYNC_TOKEN: ${{ secrets.PERSONAL_SYNC_TOKEN != '' }}
+          CHANGED: ${{ steps.merge.outputs.changed }}
+          SOURCE_HEAD: ${{ steps.merge.outputs.head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A PAT push already triggers the build; avoid duplicating that run.
+          if [[ "$HAS_SYNC_TOKEN" == 'true' && "$CHANGED" == 'true' ]]; then exit 0; fi
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/personal-desktop.yml/runs?branch=fix%2Fdirect-link-stability&per_page=30" \
+            --jq ".workflow_runs | map(select(.head_sha == \"$SOURCE_HEAD\" and (.conclusion == \"success\" or .status != \"completed\"))) | length")
+          if [[ "$count" == '0' ]]; then
+            gh workflow run personal-desktop.yml --repo "$GITHUB_REPOSITORY" --ref fix/direct-link-stability
+          fi
