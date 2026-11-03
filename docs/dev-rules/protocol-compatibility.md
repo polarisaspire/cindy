@@ -234,6 +234,26 @@ stream 匹配后才处理；信令不进入业务可靠 FIFO，也不走直连�
 直连重试保留 5 / 10 / 20 / 40 / 60 秒的指数退避档位，每次在当前档位的 80%～100%
 区间随机错峰（含 60 秒封顶档），避免多个 peer 同时失败后集中重新协商。平均间隔约为
 原固定档位的 90%；稳定连接满 60 秒后重置退避，撤权、断链或停止时仍取消待重试。
+连续 3 次打开后不足 60 秒即关闭的直连，改为该 peer 独享的 4～5 分钟随机冷却；
+接收方也拒绝冷却期间的 offer（用既有 close 信令回应），避免旧发起端绕过冷却。
+稳定满 60 秒清空短连接计数与冷却；纯协商失败仍走原指数退避，不延迟 relay 业务。
+RTC 的 `disconnected` 最多等待 2 秒恢复为 `connected`，重复事件不延长期限；
+`failed`、DataChannel 错误与主动关闭立即释放。原可靠层的 ACK 超时可提前回退，
+不受此恢复窗口阻挡。回归见 `directRuntimeBridge.test.ts`。
+
+收发 SDP 使用 `directCandidatePolicy.ts` 的同一策略过滤 `198.18.0.0/15` 候选及
+关联地址，支持其 IPv4-mapped IPv6 写法；落在该段的默认连接地址归零，其他 SDP
+属性和行结束符保持原样。正常 LAN、VPN、mDNS 和 IPv6 候选继续参与 ICE。
+支持 `RTCIceTransport.getSelectedCandidatePair()` 的平台还在 DataChannel 打开前、
+路径改变及收发时检查所选地址对，拒绝该网段，防止 mDNS 或 peer-reflexive 绕过
+候选文本过滤。旧 WebView 缺此 API 时仍可使用原直连流程、SDP 过滤及 ACK 兜底；
+API 返回空地址或 mDNS 名称时同样无法检查被隐藏的 IP，不把该兼容路径宣称为已排除
+所有隐藏地址。新旧端互通不要求新的能力字段。
+
+上述调整仅是端点本地策略，不改变信令、帧格式、授权或能力字段。自建中转
+`packages/device-link-relay/src/hub.ts` 原样转发既有 push payload，无需同步部署新服务；
+仍须运行该包测试和 `interop` 核验加入、签名通信与重连。只升级一端时，该端可执行
+冷却，但旧端仍可能立即关闭瞬断通道；完整瞬断恢复需要两端使用新 runtime。
 
 数据通道 `device-link-v1` 只使用可靠有序 SCTP；同一完整 envelope 拆为不超过 16 KiB 的
 二进制片，首字节 0/1 表示续片/末片，剩余字节是 UTF-8。单条最多 `MAX_FRAME_BYTES`，

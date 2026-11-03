@@ -265,3 +265,168 @@ it.each(['small-then-large', 'progress-under-pressure'])('reports native RTC dra
     }
   } finally { detach(); host.dispose(); }
 });
+
+// Regression: transient ICE disconnection used to tear down an otherwise usable
+// channel immediately; retry jitter alone allowed repeated short-lived opens to
+// reclaim traffic. Public runtime/negotiator entrances, unit tier, virtual time.
+// Existing tests cover retry timing but neither disconnection recovery nor flaps.
+// Minimal inputs: one disconnected event / three opened-then-closed attempts.
+// Standalone wall time: 1.17s (pnpm --filter @cindy/device-link exec vitest run
+// src/__tests__/directRuntimeBridge.test.ts, Windows, 2026-11-03).
+it.each(['recover', 'timeout', 'connecting', 'failed', 'close'] as const)('bounds RTC disconnection without affecting another peer (%s)', async outcome => {
+  vi.useFakeTimers();
+  const connections: Array<{ connectionState: string; onconnectionstatechange?: () => void }> = [];
+  vi.stubGlobal('RTCPeerConnection', class {
+    connectionState = 'connected';
+    onconnectionstatechange?: () => void;
+    constructor() { connections.push(this); }
+    close() { this.connectionState = 'closed'; this.onconnectionstatechange?.(); }
+  });
+  const runtime = createDirectRtcRuntime(), one = observers(), two = observers();
+  const first = runtime.create('one', one), second = runtime.create('two', two);
+  const change = (state: string) => {
+    connections[0].connectionState = state; connections[0].onconnectionstatechange?.();
+  };
+  try {
+    change('disconnected');
+    expect(one.closed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    change('disconnected'); // Repeated events must not extend the deadline.
+    if (outcome === 'recover') change('connected');
+    else if (outcome === 'connecting') change('connecting');
+    else if (outcome === 'failed') change('failed');
+    else if (outcome === 'close') first.close();
+    if (outcome === 'failed' || outcome === 'close') expect(one.closed).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(one.closed).toHaveBeenCalledTimes(outcome === 'recover' ? 0 : 1);
+    expect(two.closed).not.toHaveBeenCalled();
+    if (outcome === 'recover') {
+      change('disconnected');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(one.closed).toHaveBeenCalledOnce();
+    }
+  } finally { first.close(); second.close(); }
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(['a', 'z'])('holds a flapping peer on relay while another peer stays attached (identity=%s)', async identity => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  const fixture = negotiationFixture(identity);
+  const incoming = (id: string) => fixture.controller.receive('b', {
+    action: 'offer', id, stream: 'remote', targetStream: 'local', sdp: 'offer',
+  });
+  try {
+    for (let i = 0; i < 3; i++) {
+      if (identity === 'a') fixture.controller.ready('b');
+      else incoming(`incoming-${i}`);
+      fixture.sessions[i].events.open();
+      fixture.sessions[i].events.closed();
+      if (i < 2) await vi.advanceTimersByTimeAsync(i === 0 ? 4_500 : 9_000);
+    }
+    // A separate peer can open while b cools down.
+    if (identity === 'a') fixture.controller.ready('c');
+    else fixture.controller.receive('c', { action: 'offer', id: 'healthy', stream: 'remote', targetStream: 'local', sdp: 'offer' });
+    fixture.sessions[3].events.open();
+    await vi.advanceTimersByTimeAsync(60_000);
+    if (identity === 'z') incoming('premature');
+    expect(fixture.create).toHaveBeenCalledTimes(4);
+    expect(fixture.sessions[3].close).not.toHaveBeenCalled();
+    // 0.5 jitter yields a 270-second cooldown starting at the third close.
+    await vi.advanceTimersByTimeAsync(210_000);
+    if (identity === 'z') incoming('after-cooldown');
+    expect(fixture.create).toHaveBeenCalledTimes(5);
+    fixture.sessions[4].events.open();
+    await vi.advanceTimersByTimeAsync(60_000);
+    fixture.sessions[4].events.closed();
+    await vi.advanceTimersByTimeAsync(4_500);
+    if (identity === 'z') incoming('after-stable');
+    expect(fixture.create).toHaveBeenCalledTimes(6);
+  } finally { fixture.controller.clear(); }
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+// Virtual-address regression: SDP filtering alone cannot catch an mDNS or
+// peer-reflexive candidate selected by ICE. Exercise the actual runtime's SDP,
+// open, selected-pair-change and send entrances, not a copy of its policy.
+// Missing coverage: fake-IP candidates used to be advertised/accepted unchanged
+// and selected paths were never checked. Unit tier; all network APIs are local fakes.
+// Standalone file: 1.68s on Windows, 2026-11-03; fake-IP assertions failed before fix.
+it.each(['offer', 'accept', 'answer'] as const)('excludes benchmark fake-IP candidates on the %s SDP path', async action => {
+  const kept = [
+    'v=0', 'c=IN IP4 0.0.0.0',
+    'a=candidate:lan 1 udp 1 192.168.1.2 1234 typ host',
+    'a=candidate:vpn 1 udp 1 100.64.0.1 1234 typ host',
+    'a=candidate:mdns 1 udp 1 adapter.local 1234 typ host',
+    'a=candidate:ipv6 1 udp 1 fd00::1 1234 typ host',
+    'a=candidate:lower 1 udp 1 198.17.255.255 1234 typ host',
+    'a=candidate:upper 1 udp 1 198.20.0.0 1234 typ host',
+    'a=end-of-candidates', '',
+  ];
+  const unfiltered = kept.slice();
+  unfiltered[1] = 'c=IN IP4 198.18.0.1';
+  unfiltered.splice(2, 0,
+    'a=candidate:fake1 1 udp 1 198.18.0.0 1234 typ host',
+    'a=candidate:fake2 1 udp 1 198.19.255.255 1234 typ host',
+    'a=candidate:mapped 1 udp 1 ::ffff:198.18.0.1 1234 typ host',
+    'a=candidate:mappedhex 1 udp 1 ::ffff:c613:ffff 1234 typ host',
+    'a=candidate:related 1 udp 1 192.168.1.3 1234 typ srflx raddr 198.18.0.1 rport 1234');
+  const remote: Array<{ sdp: string }> = [];
+  vi.stubGlobal('RTCPeerConnection', class {
+    iceGatheringState = 'complete';
+    localDescription = { sdp: unfiltered.join('\r\n') };
+    createDataChannel() { return { label: 'device-link-v1', ordered: true, maxRetransmits: null, maxPacketLifeTime: null, close() {} }; }
+    async createOffer() { return this.localDescription; }
+    async createAnswer() { return this.localDescription; }
+    async setLocalDescription() {}
+    async setRemoteDescription(value: { sdp: string }) { remote.push(value); }
+    close() {}
+  });
+  const session = createDirectRtcRuntime().create('filtered', observers());
+  try {
+    if (action === 'offer') expect(await session.offer()).toBe(kept.join('\r\n'));
+    else if (action === 'accept') {
+      expect(await session.accept(unfiltered.join('\r\n'))).toBe(kept.join('\r\n'));
+      expect(remote[0].sdp).toBe(kept.join('\r\n'));
+    } else {
+      await session.answer(unfiltered.join('\n'));
+      expect(remote[0].sdp).toBe(kept.join('\n'));
+    }
+  } finally { session.close(); }
+});
+
+it.each(['local', 'remote', 'change', 'send', 'unavailable'] as const)('rejects a fake-IP selected path before business traffic (%s)', async mode => {
+  let pair: { local: { address: string }; remote: { address: string } } | null = {
+    local: { address: mode === 'local' ? '198.18.0.1' : 'adapter.local' },
+    remote: { address: mode === 'remote' ? '::ffff:c613:1' : '192.168.1.2' },
+  };
+  if (mode === 'unavailable') pair = null;
+  const ice = { getSelectedCandidatePair: () => pair, onselectedcandidatepairchange: null as (() => void) | null };
+  const channel = {
+    label: 'device-link-v1', ordered: true, maxRetransmits: null, maxPacketLifeTime: null,
+    readyState: 'open', bufferedAmount: 0, send: vi.fn(), close() {}, onopen: undefined as (() => void) | undefined,
+  };
+  vi.stubGlobal('RTCPeerConnection', class {
+    iceGatheringState = 'complete'; localDescription = { sdp: 'fixture' };
+    sctp = { transport: { iceTransport: ice } };
+    createDataChannel() { return channel; }
+    async createOffer() { return this.localDescription; }
+    async setLocalDescription() {}
+    close() {}
+  });
+  const events = observers(), session = createDirectRtcRuntime().create('selected', events);
+  try {
+    await session.offer(); channel.onopen?.();
+    if (mode === 'local' || mode === 'remote' || mode === 'unavailable') {
+      expect(events.open).not.toHaveBeenCalled();
+    } else {
+      expect(events.open).toHaveBeenCalledOnce();
+      pair!.remote.address = '198.19.0.1';
+      if (mode === 'change') ice.onselectedcandidatepairchange?.();
+      else expect(() => session.send('must stay on relay')).toThrow('CLOSED');
+    }
+    expect(events.closed).toHaveBeenCalledOnce();
+    expect(channel.send).not.toHaveBeenCalled();
+  } finally { session.close(); }
+  expect(ice.onselectedcandidatepairchange).toBeNull();
+});

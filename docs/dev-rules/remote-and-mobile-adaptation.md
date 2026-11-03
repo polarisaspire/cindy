@@ -184,7 +184,13 @@ relay 以 close 1013 `inbound backpressure` 主动断连，此时任何「立即
   复用同一条数据路径。手机退后台、WebView 崩溃、账号/区域切换立即释放旧通道。
 - **兼容**：双方都声明 `direct-link-v1` 才尝试。信令以既有 relay push 承载，绑定两端
   当前 stream；旧端、平台尚未就绪或协商失败均继续使用 relay。每对设备只有字典序较小的
-  deviceId 发起 offer，失败按 5–60 秒退避；最多 16 个 peer，单次协商 15 秒。
+  deviceId 发起 offer，普通失败按 5–60 秒档位错峰退避；连续 3 次短连接（打开后不足
+  60 秒关闭）则只对该 peer 冷却 4～5 分钟，接收端也拒绝过早 offer，稳定满 60 秒复位。
+  RTC 瞬断最多等待 2 秒恢复，已有可靠 ACK 超时仍可更早切回 relay；明确失败立即释放。
+  收发 SDP 过滤 `198.18.0.0/15`（含映射 IPv6 与关联地址），现代 RTC runtime 另在
+  打开、换路和收发前校验所选地址对，命中即撤下该 peer 的直连；旧 WebView 缺地址对
+  API 时保留 SDP 过滤和可靠层回退，正常 LAN/VPN/IPv6 与 mDNS 不被整体屏蔽。
+  最多 16 个 peer，单次协商 15 秒。
   relay 断线仍复位链路，直连暂不独立维持；不新增服务端依赖或 Mobile 原生依赖/配置。
 - **验证**：`client.test.ts` 的自动协商矩阵覆盖新旧端、平台不可用、远程 Agent 调用和两个
   控制端隔离回退；`directRuntimeBridge.test.ts` 覆盖桥接背压、迟到事件与流代次；
