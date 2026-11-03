@@ -65,7 +65,8 @@ jobs:
           sudo apt-get install --yes \
             build-essential python3 fakeroot dpkg desktop-file-utils libarchive-tools binutils xdg-utils xvfb \
             libgtk-3-0t64 libgbm1 libasound2t64 \
-            pkg-config libwayland-bin libwayland-dev libxkbcommon-dev libjson-c-dev libturbojpeg0-dev libpng-dev
+            pkg-config libwayland-bin libwayland-dev libxkbcommon-dev libjson-c-dev libturbojpeg0-dev libpng-dev \
+            libx11-dev libxtst-dev
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile

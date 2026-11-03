@@ -582,6 +582,9 @@ describe('maker SEND transaction', () => {
       ...item,
       fromDeviceLinkClient: true,
     }, false)).not.toHaveProperty('fromDeviceLinkClient');
+    // A remote controller must not skip the executing computer's plugin message hooks.
+    expect(stampTrustedDeviceLinkQueuedOrigin({ ...item, bypassGhostHooks: true }, true))
+      .not.toHaveProperty('bypassGhostHooks');
   });
 
   it('rejects invalid sessionId before touching transaction dependencies', async () => {
@@ -3504,6 +3507,41 @@ describe('Cindy Make task note', () => {
     expect(vi.mocked(session.send).mock.calls[2][0]).toContain(note);
   });
 
+  it('tells the agent the owner\'s message closed its input handoff card, on that message only and without saving it', async () => {
+    const session = createSession({ agentKind: 'codex' });
+    let note: string | null = '[Card closed]';
+    const { deps } = createDeps({
+      getSession: () => session,
+      readInputHandoffOwnerNote: () => note,
+      inputHandoffOwnerNoteDelivered: () => { note = null; },
+    });
+    const transaction = createMakerSendTransaction(deps);
+    await transaction.sendToAgentAccepted('session-1', 'Signed in', undefined, {
+      persistUserMessage: { clientId: 'owner-1', content: 'Signed in' },
+    });
+    expect(vi.mocked(session.send).mock.calls[0][0]).toContain('[Card closed]');
+    expect(vi.mocked(deps.createDbMessage).mock.calls[0][1].content).toBe('Signed in');
+    expect(note).toBeNull();
+    await transaction.sendToAgentAccepted('session-1', 'Continue');
+    expect(vi.mocked(session.send).mock.calls[1][0]).not.toContain('[Card closed]');
+  });
+
+  it('drops the input handoff note for a native command instead of keeping it for the next message', async () => {
+    const session = createSession({ agentKind: 'pi' });
+    let note: string | null = '[Card closed]';
+    const { deps } = createDeps({
+      getSession: () => session,
+      readInputHandoffOwnerNote: () => note,
+      inputHandoffOwnerNoteDelivered: () => { note = null; },
+    });
+    const transaction = createMakerSendTransaction(deps);
+    await transaction.sendToAgentAccepted('session-1', '/skill:review');
+    expect(vi.mocked(session.send).mock.calls[0][0]).toBe('/skill:review');
+    expect(note).toBeNull();
+    await transaction.sendToAgentAccepted('session-1', 'Continue');
+    expect(vi.mocked(session.send).mock.calls[1][0]).not.toContain('[Card closed]');
+  });
+
   it('does not decorate native commands or ordinary fork messages with side-chat instructions', async () => {
     const session = createSession({ agentKind: 'claude-code' });
     const readTaskSource = vi.fn(async () => 'side-chat');
@@ -4393,6 +4431,7 @@ describe('session-agent-switch handoff injection', () => {
         scheduledModelScope: { restore: vi.fn(async () => undefined) },
         // UI-origin cross-engine preparation can return without clearing the intent.
         applyPendingAgentSwitchIfIdle: vi.fn(async () => undefined),
+        recoverRenamedSessionModelOnSend: vi.fn(async () => undefined),
         agentSwitchDeps: {}, agentSwitchPending: pending,
         getSessionRowSnapshotStrict: vi.fn(async () => ({ orcaRole, orcaRemoteLead })),
         parseOrcaRemoteLead,
