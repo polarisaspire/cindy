@@ -3,8 +3,13 @@ name: Personal desktop packages
 on:
   push:
     branches:
-      - fix/direct-link-stability
+      - main
   workflow_dispatch:
+    inputs:
+      validate_only:
+        description: Build the selected branch without publishing an update
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,7 +21,7 @@ concurrency:
 jobs:
   package:
     name: Package ${{ matrix.platform }} x64
-    if: github.ref == 'refs/heads/fix/direct-link-stability'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.validate_only)
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +140,7 @@ jobs:
   publish:
     name: Publish verified personal updates
     needs: package
-    if: github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/fix/direct-link-stability'
+    if: github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main' && !inputs.validate_only
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

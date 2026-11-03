@@ -198,6 +198,19 @@ export function desktopLogUploadBuildEnv({ authRegion, repoRoot, configPath, all
   };
 }
 
+/** Explicit fork distribution is independent of the official private telemetry service. */
+export function desktopPackageLogUploadBuildEnv({ forkUpdateRepository = '', versionless = false, ...options } = {}) {
+  if (forkUpdateRepository) {
+    if (typeof forkUpdateRepository !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(forkUpdateRepository)
+      || forkUpdateRepository.toLowerCase() === 'makecindy/cindy') {
+      throw new Error('Invalid fork update repository for personal packaging');
+    }
+    return { [LOG_UPLOAD_TARGET_ENV]: '' };
+  }
+  return desktopLogUploadBuildEnv({ ...options, allowMissing: versionless });
+}
+
 export const __testing = { OPTIONAL_REGIONS, normalizeRegionTarget, assertRegionsIsolated };
 
 /** Mobile consumes the same validated single-region target, inlined into its JS bundle by Expo. */

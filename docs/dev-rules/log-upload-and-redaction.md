@@ -34,6 +34,11 @@ override 语义见 [`configuration-and-overrides.md`](configuration-and-override
 
 ## 1. 三条不变量
 
+自用 fork 的有版本构建在显式注入 `CINDY_FORK_UPDATE_REPOSITORY` 时，由
+`desktopPackageLogUploadBuildEnv` 强制注入空日志上传目标；不读取或继承官方私有配置。
+Vite 尊重该显式空值。普通官方有版本包仍缺配置即失败，版本无关包行为不变；运行期
+白名单、脱敏和记录边界均未放宽。自用构建约定见 [`../personal-desktop-builds.md`](../personal-desktop-builds.md)。
+
 这套东西的正确性依赖三条不变量。破坏任一条的后果都不是「功能不好用」，而是隐私事故或崩溃
 现场静默丢失。
 
