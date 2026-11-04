@@ -65,6 +65,9 @@ jobs:
       - name: Run test runner self-tests
         run: pnpm test:runner
 
+      - name: Verify personal release planning and publication recovery
+        run: node --test scripts/__tests__/personal-desktop-release.test.mjs
+
       # Cross-file security, permission, and design contracts are intentionally
       # outside the ordinary behavior-test pool, but remain a required gate.
       - name: Run Desktop and Mobile source-contract guards

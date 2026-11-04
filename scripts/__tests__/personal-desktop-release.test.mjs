@@ -11,13 +11,50 @@ import syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { preparePersonalRelease, shouldAdvancePersonalRelease, publishPersonalRelease, prepareReleaseNotes } from '../personal-desktop-release.mjs';
+import { preparePersonalRelease, shouldAdvancePersonalRelease, publishPersonalRelease, prepareReleaseNotes, planPersonalRelease } from '../personal-desktop-release.mjs';
+
+// Regression: validation/cancelled runs consumed run_number and skipped 1.0.8–10.
+// Unit tier, real planner entry with only the GitHub catalog boundary injected.
+// Observable outcomes: next version, stable rerun identity, or a blocking error.
+test('validation runs keep the next version until another stable release is published', () => {
+  const catalog = [
+    { tag_name: 'v1.0.7', draft: false, prerelease: false },
+    { tag_name: 'personal-latest', draft: false, prerelease: true },
+    { tag_name: 'v1.0.11', draft: false, prerelease: false },
+    { tag_name: 'v1.0.99-beta', draft: false, prerelease: true },
+  ];
+  const github = () => catalog.map(item => JSON.stringify(item)).join('\n');
+  for (const runId of ['100', '101', '102']) {
+    assert.equal(planPersonalRelease('polarisaspire/cindy', runId, 'a'.repeat(40), github), '1.0.12');
+  }
+  catalog.push({ tag_name: 'v1.0.12', draft: false, prerelease: false });
+  assert.equal(planPersonalRelease('polarisaspire/cindy', '103', 'a'.repeat(40), github), '1.0.13');
+});
+
+test('an interrupted draft is resumed only by its original run and source', () => {
+  const body = `<!-- cindy-personal-release ${JSON.stringify({ runId: '100', sourceCommit: 'a'.repeat(40) })} -->`;
+  const github = () => [
+    { tag_name: 'v1.0.11', draft: false, prerelease: false },
+    { tag_name: 'v1.0.12', draft: true, prerelease: false, body },
+  ].map(item => JSON.stringify(item)).join('\n');
+  assert.equal(planPersonalRelease('polarisaspire/cindy', '100', 'a'.repeat(40), github), '1.0.12');
+  assert.throws(() => planPersonalRelease('polarisaspire/cindy', '100', 'b'.repeat(40), github), /rerun source mismatch/);
+  assert.throws(() => planPersonalRelease('polarisaspire/cindy', '101', 'a'.repeat(40), github), /unfinished release/);
+});
+
+test('a missing release history or exhausted Windows version range cannot allocate a version', () => {
+  assert.throws(() => planPersonalRelease('polarisaspire/cindy', '100', 'a'.repeat(40), () => { throw new Error('API unavailable'); }), /API unavailable/);
+  assert.throws(() => planPersonalRelease('polarisaspire/cindy', '100', 'a'.repeat(40), () => JSON.stringify({
+    tag_name: 'v1.0.65535', draft: false, prerelease: false,
+  })), /Windows version limit/);
+  assert.equal(planPersonalRelease('polarisaspire/cindy', '100', 'a'.repeat(40), () => ''), '1.0.1');
+});
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-personal-release-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const options = { inputDir: path.join(root, 'input'), outputDir: path.join(root, 'output'),
-    repository: 'polarisaspire/cindy', runNumber: '3', runId: '123456', commitSha: 'a'.repeat(40) };
+    repository: 'polarisaspire/cindy', version: '1.0.3', runId: '123456', commitSha: 'a'.repeat(40) };
   const builds = {};
   for (const platform of ['win32', 'linux']) {
     const dir = path.join(options.inputDir, `cindy-personal-${platform}-x64-${options.commitSha}`);
@@ -166,6 +203,9 @@ for (const state of ['complete', 'split', 'empty']) {
     const canonical = f.releases.get('v1.0.3');
     assert.equal(canonical.isDraft, false);
     assert.match(canonical.body, /修复版本日志/);
+    assert.equal(planPersonalRelease(f.options.repository, f.options.runId, f.options.commitSha,
+      () => JSON.stringify({ tag_name: 'v1.0.3', draft: false, prerelease: false, body: canonical.body })), '1.0.3',
+    'rerunning the published workflow must not allocate another release');
     assert.equal(JSON.parse(canonical.files.get('release-notes.json')).version, '1.0.3');
     assert.deepEqual(JSON.parse(canonical.files.get('release-notes-index.json')), ['1.0.3']);
     const compat = JSON.parse(f.releases.get('personal-latest').files.get('manifest-win32-x64.json'));

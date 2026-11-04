@@ -27,11 +27,10 @@ async function digestFile(file) {
 }
 
 /** Only a verified pair can produce update pointers. Never publish partial builds. */
-export async function preparePersonalRelease({ inputDir, outputDir, repository, runNumber, runId, commitSha }) {
+export async function preparePersonalRelease({ inputDir, outputDir, repository, version, runId, commitSha }) {
   requireValue(/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(repository), 'Invalid fork repository');
   requireValue(/^[1-9]\d*$/.test(String(runId)), 'Invalid release run ID');
   requireValue(/^[a-f0-9]{40}$/.test(commitSha), 'Invalid source commit');
-  const version = `1.0.${runNumber}`;
   personalNumber(version);
   const tag = `v${version}`;
   const manifests = [], assets = [];
@@ -83,6 +82,38 @@ function gh(args, { optional = false } = {}) {
 function releaseInfo(repository, tag, github) {
   const text = github(['release', 'view', tag, '--repo', repository, '--json', 'tagName,isDraft,assets,targetCommitish,body'], { optional: true });
   return text === null ? null : JSON.parse(text);
+}
+
+/** Validation does not reserve a number. A rerun resumes its original release,
+ * including a draft left by an interrupted upload, rather than releasing twice.
+ * The workflow serializes planning through publication across all branches. */
+export function planPersonalRelease(repository, runId, commitSha, github = gh) {
+  requireValue(/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(repository), 'Invalid fork repository');
+  requireValue(/^[1-9]\d*$/.test(String(runId)) && /^[a-f0-9]{40}$/.test(commitSha), 'Invalid release run identity');
+  const catalog = github(['api', '--paginate', `repos/${repository}/releases?per_page=100`,
+    '--jq', '.[] | {tag_name,draft,prerelease,body} | tojson']);
+  const releases = catalog.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const personal = releases.filter(item => /^v1\.0\.[1-9][0-9]*$/.test(item.tag_name));
+  const resumed = personal.filter(item => {
+    const match = item.body?.match(/<!-- cindy-personal-release (\{[^\n]*\}) -->/);
+    if (!match) return false;
+    const identity = JSON.parse(match[1]);
+    if (identity.runId !== String(runId)) return false;
+    requireValue(identity.sourceCommit === commitSha, 'Release rerun source mismatch');
+    return true;
+  });
+  requireValue(resumed.length <= 1, 'Multiple releases belong to this run');
+  if (resumed.length) {
+    personalNumber(resumed[0].tag_name.slice(1));
+    return resumed[0].tag_name.slice(1);
+  }
+  const published = personal.filter(item => !item.draft && !item.prerelease);
+  const next = Math.max(0, ...published.map(item => personalNumber(item.tag_name.slice(1)))) + 1;
+  const version = `1.0.${next}`;
+  personalNumber(version);
+  requireValue(!personal.some(item => item.tag_name === `v${version}`),
+    'Next version already has an unfinished release; rerun its original workflow before starting another release');
+  return version;
 }
 
 function runGit(args) {
@@ -257,6 +288,7 @@ export async function publishPersonalRelease(outputDir, repository, runId, commi
   let notes;
   if (!release || release.isDraft) {
     notes = prepareReleaseNotes(repository, version, commitSha, previousTag === tag ? undefined : previousTag, github, git);
+    notes.body += `\n\n<!-- cindy-personal-release ${JSON.stringify({ runId: String(runId), sourceCommit: commitSha })} -->`;
     const history = JSON.parse(github(['release', 'list', '--repo', repository, '--limit', '1000', '--json', 'tagName,isDraft']));
     const versions = history.filter(item => !item.isDraft && /^v1\.0\.[1-9][0-9]*$/.test(item.tagName))
       .map(item => item.tagName.slice(1));
@@ -323,10 +355,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const repository = process.env.GITHUB_REPOSITORY;
   const runId = process.env.GITHUB_RUN_ID;
   const commitSha = process.env.GITHUB_SHA;
-  if (command === 'prepare' && first && second) {
+  if (command === 'plan') {
+    console.log(`version=${planPersonalRelease(repository, runId, commitSha)}`);
+  } else if (command === 'prepare' && first && second) {
     await preparePersonalRelease({ inputDir: first, outputDir: second, repository,
-      runNumber: process.env.GITHUB_RUN_NUMBER, runId, commitSha });
+      version: process.env.PERSONAL_VERSION, runId, commitSha });
   } else if (command === 'publish' && first) {
     await publishPersonalRelease(first, repository, runId, commitSha);
-  } else throw new Error('Usage: personal-desktop-release.mjs prepare <downloads> <new-output> | publish <output>');
+  } else throw new Error('Usage: personal-desktop-release.mjs plan | prepare <downloads> <new-output> | publish <output>');
 }
