@@ -225,8 +225,16 @@ relay 以 close 1013 `inbound backpressure` 主动断连，此时任何「立即
   收发 SDP 过滤 `198.18.0.0/15`（含映射 IPv6 与关联地址），现代 RTC runtime 另在
   打开、换路和收发前校验所选地址对，命中即撤下该 peer 的直连；旧 WebView 缺地址对
   API 时保留 SDP 过滤和可靠层回退，正常 LAN/VPN/IPv6 与 mDNS 不被整体屏蔽。
-  最多 16 个 peer，单次协商 15 秒。
+  单次协商 15 秒。桌面共享数据进程预算 64，同账号设备与分享各预留 8；手机维持 16。
+  满额继续 relay、释放后按公平队列补建；容量边界见
+  [`protocol-compatibility.md`](protocol-compatibility.md#device-link-局域网优先直连)。
   relay 断线仍复位链路，直连暂不独立维持；不新增服务端依赖或 Mobile 原生依赖/配置。
+- **容量恢复的故障半径三问**：① 单 peer 的直连准入满额／协商失败；② 仅该 peer 排队、
+  释放直连资源并改用既有 relay，不重开控制 link、不重连共享 socket、不改任务分配或授权；
+  只有无在途工作且长期无活动的通道才可在容量压力下让位；③ `directRuntimeBridge.test.ts`
+  覆盖共享预算、分类公平、迟到 offer、撤权与回收，`client.test.ts` 验证满额期间请求仍只执行
+  一次、名额释放后自动升级且不新建 socket。真实浏览器 `--capacity` 同时验证第 65 个等待者
+  补建时其余 63 条通道不被替换；自建 relay 互通验证签名、加入与重连不受影响。
 - **验证**：`client.test.ts` 的自动协商矩阵覆盖新旧端、平台不可用、远程 Agent 调用和两个
   控制端隔离回退；`directRuntimeBridge.test.ts` 覆盖桥接背压、迟到事件与流代次；
   `scripts/direct-link-smoke.mjs <Chrome路径>` 运行真实 WebRTC 与手机静态 runtime，验证
