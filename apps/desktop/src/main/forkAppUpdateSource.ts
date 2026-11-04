@@ -10,11 +10,12 @@ export function getForkUpdateBaseUrl(): string {
   return `https://github.com/${repository}/releases/download`;
 }
 
-function isAsset(value: unknown, extension: string): value is PlatformAsset {
+function isAsset(value: unknown, extension: string, version: string): value is PlatformAsset {
   if (!value || typeof value !== 'object') return false;
   const asset = value as PlatformAsset;
   return typeof asset.file === 'string'
-    && new RegExp(`^personal-[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*\\.${extension}$`).test(asset.file)
+    && (asset.file.split('/')[0] === `v${version}` || /^personal-[1-9][0-9]*$/.test(asset.file.split('/')[0]))
+    && new RegExp(`^[^/]+/[A-Za-z0-9][A-Za-z0-9._-]*\\.${extension}$`).test(asset.file)
     && typeof asset.sha256 === 'string' && /^[a-fA-F0-9]{64}$/.test(asset.sha256)
     && Number.isSafeInteger(asset.size) && asset.size > 0;
 }
@@ -28,9 +29,9 @@ export function isForkAppManifest(value: unknown, expectedRepository = repositor
     && typeof data.sourceCommit === 'string' && /^[a-fA-F0-9]{40}$/.test(data.sourceCommit)
     && typeof data.app?.version === 'string' && /^1\.0\.[1-9][0-9]*$/.test(data.app.version)
     && Number(data.app.version.slice(4)) <= 65535
-    && (platformKey === 'win32-x64' ? isAsset(data.app.hotfix, 'zip') : platformKey === 'linux-x64' && isAsset(data.app.installer, 'deb'))
-    && (data.app.hotfix === undefined || isAsset(data.app.hotfix, 'zip'))
-    && (data.app.installer === undefined || isAsset(data.app.installer, platformKey === 'linux-x64' ? 'deb' : 'exe'));
+    && (platformKey === 'win32-x64' ? isAsset(data.app.hotfix, 'zip', data.app.version) : platformKey === 'linux-x64' && isAsset(data.app.installer, 'deb', data.app.version))
+    && (data.app.hotfix === undefined || isAsset(data.app.hotfix, 'zip', data.app.version))
+    && (data.app.installer === undefined || isAsset(data.app.installer, platformKey === 'linux-x64' ? 'deb' : 'exe', data.app.version));
 }
 
 /** App-only metadata; never feeds the official engine cache or its observers. */
@@ -42,7 +43,7 @@ export async function fetchForkAppManifest(
 ): Promise<Manifest | null> {
   if (!REPOSITORY_PATTERN.test(expectedRepository)
     || !['win32-x64', 'linux-x64'].includes(platformKey) || signal?.aborted) return null;
-  const url = `https://github.com/${expectedRepository}/releases/download/personal-latest/manifest-${platformKey}.json?t=${Date.now()}`;
+  const url = `https://github.com/${expectedRepository}/releases/latest/download/manifest-${platformKey}.json?t=${Date.now()}`;
   return new Promise((resolve) => {
     try {
       const request = net.request(url);

@@ -31,7 +31,7 @@ describe('fork application manifest', () => {
   it('resolves only the pinned repository stable manifest', async () => {
     respond(manifest());
     expect(await fetchForkAppManifest(repository, 'win32-x64')).toEqual(manifest());
-    expect(request).toHaveBeenCalledWith(expect.stringMatching(/^https:\/\/github.com\/polarisaspire\/cindy\/releases\/download\/personal-latest\/manifest-win32-x64.json/));
+    expect(request).toHaveBeenCalledWith(expect.stringMatching(/^https:\/\/github.com\/polarisaspire\/cindy\/releases\/latest\/download\/manifest-win32-x64.json/));
   });
   it('accepts the Linux DEB-only publisher manifest without a Windows hotfix', async () => {
     const value = {
@@ -40,7 +40,14 @@ describe('fork application manifest', () => {
     };
     respond(value);
     expect(await fetchForkAppManifest(repository, 'linux-x64')).toEqual(value);
-    expect(request).toHaveBeenCalledWith(expect.stringMatching(/\/personal-latest\/manifest-linux-x64\.json/));
+    expect(request).toHaveBeenCalledWith(expect.stringMatching(/\/latest\/download\/manifest-linux-x64\.json/));
+  });
+  // Regression: 1.0.6 only allowed numeric personal tags, rejecting canonical v tags.
+  it.each(['v1.0.3', 'v1.0.4'])('binds canonical asset tags to the advertised version (%s)', async tag => {
+    const value = manifest();
+    value.app.hotfix.file = `${tag}/cindy-1.0.3-hotfix.zip`;
+    respond(value);
+    expect(await fetchForkAppManifest(repository, 'win32-x64')).toEqual(tag === 'v1.0.3' ? value : null);
   });
   it.each(['repository', 'platform', 'commit', 'version', 'version-overflow', 'path', 'hash', 'size', 'official'])('rejects invalid %s metadata', async (field) => {
     const value = manifest();
