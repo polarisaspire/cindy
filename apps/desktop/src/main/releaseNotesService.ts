@@ -9,6 +9,8 @@
  *   version index: {CDN_BASE}/notice/{platformKey}/index.json
  *     e.g. https://cdn.example.com/app/notice/darwin-arm64/index.json
  *          → ["0.0.31", "0.0.78", ..., "0.0.124"]  (sorted ascending)
+ * Fork builds instead read release-notes.json from their v<version> Release
+ * and release-notes-index.json from releases/latest/download in the pinned repo.
  *
  * The platform key is the SAME `${process.platform}-${process.arch}` value
  * used by manifestService — release notes and hot-update manifests share the
@@ -35,6 +37,7 @@ import {
 } from '../shared/releaseNotesContent';
 
 import { getBaseUrl, getPlatformKey } from './manifestService';
+import { getForkUpdateRepository } from './forkAppUpdateSource';
 
 import { createLogger } from './logger';
 
@@ -194,6 +197,8 @@ async function fetchCdnJson<T>(url: string): Promise<T | null> {
  * Returns null on 404 / network error / parse error (silent — caller decides UX).
  */
 export async function fetchReleaseNotes(version: string): Promise<RawReleaseNotes | null> {
+  const fork = getForkUpdateRepository();
+  if (fork && !/^1\.0\.[1-9][0-9]*$/.test(version)) return null;
   const hit = cache.get(version);
   if (hit) return hit;
 
@@ -203,9 +208,11 @@ export async function fetchReleaseNotes(version: string): Promise<RawReleaseNote
   const request = (async () => {
     const platform = getPlatformKey();
     // Cache-bust to dodge stale CDN edges
-    const url = `${getBaseUrl()}/notice/${platform}/${version}.json?t=${Date.now()}`;
+    const url = fork
+      ? `https://github.com/${fork}/releases/download/v${version}/release-notes.json?t=${Date.now()}`
+      : `${getBaseUrl()}/notice/${platform}/${version}.json?t=${Date.now()}`;
     const json = await fetchCdnJson<RawReleaseNotes>(url);
-    if (!json) return null;
+    if (!json || (fork && json.version !== version)) return null;
     // A 200 payload with nothing renderable (e.g. a v2 document whose topics
     // are all malformed) is treated as a failed fetch and NOT cached — the
     // process-lifetime cache would otherwise keep serving the bad document
@@ -244,13 +251,16 @@ export async function fetchReleaseNotesIndex(): Promise<string[] | null> {
   if (indexCache) return indexCache;
 
   const platform = getPlatformKey();
-  const url = `${getBaseUrl()}/notice/${platform}/index.json?t=${Date.now()}`;
+  const fork = getForkUpdateRepository();
+  const url = fork
+    ? `https://github.com/${fork}/releases/latest/download/release-notes-index.json?t=${Date.now()}`
+    : `${getBaseUrl()}/notice/${platform}/index.json?t=${Date.now()}`;
   const json = await fetchCdnJson<unknown>(url);
   if (!Array.isArray(json)) {
     if (json !== null) log.warn('index.json is not an array; ignoring');
     return null;
   }
-  const versions = json.filter((v): v is string => typeof v === 'string');
+  const versions = json.filter((v): v is string => typeof v === 'string' && (!fork || /^1\.0\.[1-9][0-9]*$/.test(v)));
   indexCache = versions;
   log.info('Fetched index OK: %d versions', versions.length);
   return versions;
