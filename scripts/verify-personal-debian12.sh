@@ -4,6 +4,7 @@ set -euo pipefail
 source /etc/os-release
 test "$ID" = debian && test "$VERSION_ID" = 12
 export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
 apt-get update
 apt-get install --yes --no-install-recommends \
   binutils python3 xvfb xauth libgtk-3-0 libgbm1 libasound2 libnss3 \
@@ -15,7 +16,8 @@ test "${#installers[@]}" -eq 1
 apt-get install --yes "${installers[0]}"
 package=$(dpkg-deb --field "${installers[0]}" Package)
 installed_exe=$(dpkg-query --listfiles "$package" | while IFS= read -r file; do
-  if [[ "$(basename "$file")" == "$package" && -f "$file" && -x "$file" && -f "$(dirname "$file")/resources/app.asar" ]]; then
+  file_name=$(basename "$file")
+  if [[ "${file_name,,}" == "$package" && -f "$file" && -x "$file" && -f "$(dirname "$file")/resources/app.asar" ]]; then
     printf '%s\n' "$file"
   fi
 done)
