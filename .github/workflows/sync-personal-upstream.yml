@@ -50,7 +50,7 @@ jobs:
           echo 'changed=true' >> "$GITHUB_OUTPUT"
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       # GitHub deliberately does not trigger push workflows for GITHUB_TOKEN pushes.
-      - name: Dispatch tests and packaging for main
+      - name: Dispatch tests for main without publishing
         env:
           GH_TOKEN: ${{ github.token }}
           HAS_SYNC_TOKEN: ${{ secrets.PERSONAL_SYNC_TOKEN != '' }}
@@ -59,10 +59,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # A PAT push already triggers the build; avoid duplicating that run.
+          # A PAT push already triggers client-ci; avoid duplicating that run.
           if [[ "$HAS_SYNC_TOKEN" == 'true' && "$CHANGED" == 'true' ]]; then exit 0; fi
-          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/personal-desktop.yml/runs?branch=main&per_page=30" \
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&per_page=30" \
             --jq ".workflow_runs | map(select(.head_sha == \"$SOURCE_HEAD\" and (.conclusion == \"success\" or .status != \"completed\"))) | length")
           if [[ "$count" == '0' ]]; then
-            gh workflow run personal-desktop.yml --repo "$GITHUB_REPOSITORY" --ref main
+            gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref main
           fi

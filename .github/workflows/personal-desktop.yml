@@ -1,27 +1,45 @@
 name: Personal desktop packages
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       validate_only:
         description: Build the selected branch without publishing an update
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: personal-desktop-${{ github.ref }}
+  # Serialize allocation as well as publication, across validation branches.
+  group: personal-desktop
   cancel-in-progress: false
 
 jobs:
+  plan:
+    name: Select version from published releases
+    if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.validate_only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Select next release or resume this run
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/personal-desktop-release.mjs plan >> "$GITHUB_OUTPUT"
+
   package:
     name: Package ${{ matrix.platform }} x64
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.validate_only)
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +56,7 @@ jobs:
     timeout-minutes: 120
     env:
       NODE_OPTIONS: --max-old-space-size=8192
-      PERSONAL_VERSION: 1.0.${{ github.run_number }}
+      PERSONAL_VERSION: ${{ needs.plan.outputs.version }}
       CINDY_FORK_UPDATE_REPOSITORY: ${{ github.repository }}
       # Packaging ensures the pinned ripgrep itself; don't prefetch every harness.
       XDT_SKIP_AGENT_BIN_INSTALL: '1'
@@ -159,7 +177,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cindy-personal-${{ matrix.platform }}-x64-${{ github.sha }}
-          path: apps/desktop/release/artifacts/global/1.0.${{ github.run_number }}/${{ matrix.platform }}-x64/
+          path: apps/desktop/release/artifacts/global/${{ needs.plan.outputs.version }}/${{ matrix.platform }}-x64/
           if-no-files-found: error
           retention-days: 14
 
@@ -184,12 +202,14 @@ jobs:
 
   publish:
     name: Publish verified personal updates
-    needs: [package, linux-compatibility]
-    if: github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main' && !inputs.validate_only
+    needs: [plan, package, linux-compatibility]
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main' && !inputs.validate_only
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      PERSONAL_VERSION: ${{ needs.plan.outputs.version }}
     concurrency:
       group: personal-update-publication
       cancel-in-progress: false
