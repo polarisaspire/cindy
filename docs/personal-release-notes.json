@@ -1,5 +1,10 @@
 [
   {
+    "id": "linux-debian12-compatibility",
+    "title": "修复 Debian 12 安装兼容性",
+    "text": "Linux 安装包改为在 Debian 12 环境编译，避免 SQLite 等原生模块要求更高版本的系统库。发布前新增最终安装包的系统库检查、干净环境安装和启动验证，防止后续更新再次覆盖为不兼容的模块。"
+  },
+  {
     "id": "versioned-releases",
     "title": "版本发布更清楚",
     "text": "新版本使用 v版本号标签，最新正式版本标记为 Latest；旧版更新入口保留兼容，已安装的 1.0.6 仍能检查并下载升级。"

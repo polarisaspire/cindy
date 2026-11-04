@@ -11,6 +11,10 @@
 
 构建矩阵为 Windows x64 `Setup.exe` 和 Linux x64 `.deb`；目前固定 `global`。bp-holder 安装前先核对 `uname -m` 与系统发行版，arm64 不能安装 x64 包。
 
+Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`（Debian 12 / glibc 2.36）容器内执行，Ubuntu 仅承载容器。不能直接在 Ubuntu 24.04 编译后宣称支持 Debian 12：`better-sqlite3` 等模块会继承构建机的较新系统库要求。Windows 构建环境不变。
+
+两平台打包完成后，独立 job 将最终 `.deb` 装进全新的 `node:22-bookworm-slim`，扫描安装目录内全部 ELF 的 glibc 需求（上限 2.36），并复用 packaged smoke 在隔离的临时数据目录启动真实应用、运行 SQLite migration 和读取数据库表。验证环境不安装编译工具，也不复用构建目录或旧版原生模块；任一安装、库检查或启动失败都会阻止发布。此门禁验证 Debian 12 x64，不代表已经覆盖所有 Linux 发行版。
+
 产物目录为 `apps/desktop/release/artifacts/global/1.0.<run_number>/<platform>-x64/`，包括 `build-info.json`、`SOURCE.txt`、`SHA256SUMS.txt`。`SOURCE.txt` 记录源码 SHA 和该次 Actions 链接。Artifact 保留 14 天。
 
 构建 job 只有仓库读取权限。两平台的测试、类型检查与 packaged smoke 都成功后，独立发布 job 才获得本 fork 的 `contents: write`，创建 `v1.0.<run_number>` Release。先上传并验证全部资产、完成旧版兼容入口，再发布为非 prerelease 并设为 Latest；不上传官方更新源。安装包未签名，不需要官方签名凭证。实际分发状态以 GitHub run 与 Release 为准，不能把本地测试通过当成已发布。
