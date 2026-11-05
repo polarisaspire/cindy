@@ -2,9 +2,7 @@ name: Sync personal Cindy from upstream
 
 on:
   # Explicit staging requests only. The daily controller owns ordering/review.
-  push:
-    branches:
-      - 'automation/upstream-sync/**'
+  create:
   workflow_dispatch:
 
 permissions:
@@ -12,12 +10,12 @@ permissions:
   actions: write
 
 concurrency:
-  group: personal-upstream-sync
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/upstream-sync/'))) && 'personal-upstream-sync' || format('personal-upstream-ignore-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   sync:
-    if: github.repository == 'polarisaspire/cindy' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/automation/upstream-sync/'))
+    if: github.repository == 'polarisaspire/cindy' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/upstream-sync/')))
     runs-on: ubuntu-24.04
     # Staging waits for CI but can never request an installer or release.
     timeout-minutes: 85
@@ -38,7 +36,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HAS_SYNC_TOKEN: ${{ secrets.PERSONAL_SYNC_TOKEN != '' }}
-          SYNC_REQUEST: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          SYNC_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
         run: node scripts/sync-personal-upstream.mjs stage
       - name: Report incomplete synchronization
         if: failure() || cancelled()

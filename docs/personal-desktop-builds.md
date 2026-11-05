@@ -31,7 +31,7 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 ### 第一阶段：同步正式版，只验证不发布
 
-控制器查询官方 `makecindy/cindy` 的非 draft、非 prerelease 正式 `v主.次.补丁` Release。需要同步时，将当前 main 的完整 SHA 记为 `<base>`，在本 fork 创建一次性分支 `automation/upstream-sync/<上游tag>/<base>`，目标必须为 `<base>`。已存在同名请求时读取原 Actions run，不重复创建或强推。这个显式请求触发 **Sync personal Cindy from upstream**，也可在 main 手动 dispatch 此暂存工作流。
+控制器查询官方 `makecindy/cindy` 的非 draft、非 prerelease 正式 `v主.次.补丁` Release。需要同步时，将当前 main 的完整 SHA 记为 `<base>`，在本 fork 创建一次性分支 `automation/upstream-sync/<上游tag>/<base>`，目标必须为 `<base>`。已存在同名请求时读取原 Actions run，不重复创建或强推。GitHub 的 `create` 事件捕获这个显式分支创建请求并触发 **Sync personal Cindy from upstream**，也可在 main 手动 dispatch 此暂存工作流。
 
 工作流通过实际 tag 提交（支持 annotated tag）解析来源并核对 fetch 后的 SHA，不使用 target_commitish 或官方 main 开发快照。请求源码必须仍在 main 历史中，正常重跑可保留此前已经合入的结果。新正式版本按顺序以带 DCO 的普通 merge 合入 main，不 reset、不强推、不丢弃 fork 修改；冲突 abort，不推送失败结果。既有未完成 Release draft 会阻止 main 继续前进，先由控制器处理恢复或报告决定点。
 
@@ -49,7 +49,7 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 仅在第二阶段结束后，控制器在本 fork 创建 `automation/personal-release/<完整final-SHA>` 分支，目标必须正是当前 main 的 `<final-SHA>`。这是一次性、绑定源码的“本轮检查完成”信号，不是普通 main push。无实际待发布客户端变更、仅部署本维护配置时不创建请求，也不为已包含的上游版本重复发版。
 
-此请求触发 **Personal desktop packages**。plan job 验证分支名中的 SHA、事件源码、当前 main、完整 `client-ci` 以及最新官方正式版的祖先关系；同一源码已发布则直接跳过。个人 PR 即使基于已经发布过的上游版本，也可按新的最终源码发版。构建、Artifact、build-info、SOURCE、清单及标签统一使用固定事件 SHA。发布前再次核对 main 与 CI；main 变化或检查失败就停止，控制器必须重新检查最终源码，再提交新的请求。
+该分支的 `create` 事件触发 **Personal desktop packages**，不是后续 push。只接受 branch 类型及对应请求前缀，其他分支或 tag 的创建不会运行构建，也不共享受控发布的并发组。plan job 验证分支名中的 SHA、事件源码、当前 main、完整 `client-ci` 以及最新官方正式版的祖先关系；同一源码已发布则直接跳过。个人 PR 即使基于已经发布过的上游版本，也可按新的最终源码发版。plan、构建和发布均显式 checkout 固定事件 SHA；Artifact、build-info、SOURCE、清单及标签统一使用它。发布前再次核对 main 与 CI；main 变化或检查失败就停止，控制器必须重新检查最终源码，再提交新的请求。
 
 工作流只构建 Windows x64 和 Linux x64，保留全部测试、packaged smoke、干净 Debian 12 安装、SHA256 与双平台一致性门禁。两平台全部通过后才更新 fork Release 与既有兼容清单，不自动安装或重启客户端。
 
