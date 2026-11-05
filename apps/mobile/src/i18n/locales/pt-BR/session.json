@@ -1,4 +1,32 @@
 {
+  "githubPrs": {
+    "title": "Gerenciar links de PRs",
+    "hint": "Até 3 no cabeçalho; PRs fixados aparecem primeiro",
+    "empty": "Cole um link de PR do GitHub ou MR do GitLab para adicioná-lo",
+    "removed": "Removidos: {{count}}",
+    "legacy": "Referências não confirmadas: {{count}}",
+    "addLabel": "Adicionar link de PR",
+    "add": "Adicionar PR",
+    "loading": "Carregando…",
+    "restore": "Restaurar PR",
+    "pin": "Fixar no cabeçalho",
+    "unpin": "Desafixar PR / MR",
+    "pinLimit": "Fixar até 3 PRs",
+    "reorderHint": "Use Alt+↑/↓ para reordenar dentro do grupo de fixados ou não fixados.",
+    "dragHandle": "Arraste para reordenar {{repo}} #{{number}}",
+    "remove": "Remover PR",
+    "errors": {
+      "duplicate": "Este PR já está vinculado; restaure os links removidos pela lista",
+      "notFound": "PR não encontrado ou acesso negado",
+      "invalidUrl": "Insira um link válido de PR do GitHub ou MR do GitLab",
+      "reorderFailed": "A ordem não foi salva. Tente novamente.",
+      "verifyFailed": "Não foi possível verificar o PR; confira o login e o acesso ao GitHub ou GitLab",
+      "unsupported": "A versão deste computador não permite gerenciar links de PRs",
+      "failed": "Não foi possível atualizar os links de PRs"
+    },
+    "urlPlaceholder": "Link de PR do GitHub ou MR do GitLab",
+    "moveUp": "Mover para cima"
+  },
   "paneResize": {
     "label": "Largura da coluna",
     "hint": "Arraste para a esquerda ou direita para ajustar a largura das colunas"
@@ -197,7 +225,7 @@
       },
       "actionCopy": {
         "pending": "Resolva a solicitação pendente primeiro; a área de entrada será restaurada depois.",
-        "archived": "Esta sessão está arquivada. Restaure-a antes de enviar mais mensagens.",
+        "archived": "Esta sessão está arquivada. Enviar uma mensagem a desarquiva automaticamente.",
         "deleted": "Esta sessão foi excluída e não pode ser alterada.",
         "queuePaused": "A fila está pausada. Retome-a pelo painel da fila."
       }
@@ -212,7 +240,25 @@
       },
       "context": {
         "title": "Uso do contexto",
-        "unavailable": "Sem dados de contexto"
+        "unavailable": "Sem dados de contexto",
+        "estimate": {
+          "title": "Estimativas de texto",
+          "delivery": "Apresentação das respostas",
+          "host": "Instruções da Cindy",
+          "plugins": "Catálogo de plugins",
+          "memoryRules": "Instruções de memória",
+          "memoryIndex": "Índice de memória",
+          "profile": "Perfil do colega",
+          "user": "Instruções do usuário",
+          "directories": "Diretórios adicionais",
+          "native": "Instruções do Pi",
+          "skills": "Catálogo de Skills",
+          "project": "Instruções do projeto",
+          "tools": "Definições das ferramentas",
+          "messages": "Texto da conversa",
+          "other": "Outras instruções",
+          "note": "Estimativa do texto atual, sem a tokenização do modelo. Exclui imagens e formatação do fornecedor; a soma difere do total nativo."
+        }
       },
       "rateLimit": {
         "plan": "Plano",
@@ -437,11 +483,12 @@
     "chipArchived": "Arquivadas",
     "titleFallback": "Sessão remota",
     "unnamedTitle": "Sessão sem título",
+    "openSection": "Abrir",
     "renameAction": "Renomear sessão",
     "copyLinkAction": "Copiar link da sessão",
     "unpin": "Desafixar",
     "pin": "Fixar",
-    "restore": "Restaurar",
+    "restore": "Desarquivar",
     "archive": "Arquivar",
     "deleteAction": "Excluir sessão",
     "deleteConversation": "Excluir sessão",
@@ -635,7 +682,7 @@
     "REMOTE_PROVIDER_UPDATING": "As credenciais deste provedor de modelos estão sendo atualizadas. Tente novamente em instantes.",
     "REMOTE_WORKDIR_UNAVAILABLE": "O diretório de trabalho remoto está indisponível. Verifique se a pasta ainda existe nesse computador e tente novamente.",
     "REMOTE_OPTIMISTIC_SESSION_STATE_UNAVAILABLE": "O computador ainda não pode confirmar se esta mensagem foi enviada. Aguarde um momento e tente novamente. Não envie a mesma mensagem duas vezes.",
-    "REMOTE_AGENT_UNAVAILABLE": "Não foi possível acessar o computador que executa o Agent. Verifique se ele está online e permite controle remoto e tente novamente.",
+    "REMOTE_AGENT_UNAVAILABLE": "A conexão com o computador que executa o Agent caiu. Tente novamente. Se continuar acontecendo, verifique se ele está online e permite controle remoto.",
     "REMOTE_AGENT_PEER_TOO_OLD": "O Cindy no outro computador é antigo demais para executar o Agent para este. Atualize o Cindy lá primeiro.",
     "REMOTE_AGENT_EXPIRED": "Esta sessão já foi encerrada no computador que executa o Agent. Envie sua mensagem novamente.",
     "REMOTE_AGENT_NOT_FOUND": "Esta sessão já foi encerrada no computador que executa o Agent. Envie sua mensagem novamente.",
@@ -780,5 +827,17 @@
     "confirm": "Trocar",
     "remember": "Trocar e fazer isso automaticamente a partir de agora (somente nesta tarefa)",
     "cancel": "Cancelar"
+  },
+  "messageEdit": {
+    "editing": "Editando mensagem",
+    "discard": "Descartar edição da mensagem",
+    "stopTimeout": "O tempo de espera para a tarefa parar esgotou — tente novamente",
+    "queueNotEmpty": "Esta sessão tem mensagens na fila — envie ou remova essas mensagens antes de editar",
+    "notLast": "Há uma mensagem mais recente nesta sessão — esta não é mais a última e não pode ser editada",
+    "failed": "Falha ao editar e reenviar. Tente novamente",
+    "noPriorAssistant": "Não há resposta da IA antes desta mensagem, e a versão do Cindy no computador ainda não consegue editá-la. Atualize o Cindy no computador e tente novamente.",
+    "uploadsPending": "Ainda há anexos sendo enviados. Aguarde a conclusão antes de editar a mensagem.",
+    "rollbackHint": "O envio desfará alterações em {{count}} arquivo(s) do último turno",
+    "conversationOnlyHint": "O envio não restaurará os arquivos do projeto; as alterações anteriores nos arquivos serão mantidas"
   }
 }
