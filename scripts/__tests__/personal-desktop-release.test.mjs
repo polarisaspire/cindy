@@ -311,3 +311,17 @@ for (const failure of [null, 'missing-chinese', 'shallow-history', 'unrelated-pr
     }
   });
 }
+
+
+
+// Synchronization identity must survive draft recovery so a moved official tag
+// cannot masquerade as the previously processed release. Unit, same publisher.
+test('automatic publication records the verified official release identity', async t => {
+  const f = await publisherFixture(t);
+  const upstream = { releaseId: 126, tag: 'v0.1.126', commitSha: 'c'.repeat(40) };
+  await publishPersonalRelease(f.options.outputDir, f.options.repository, f.options.runId, f.options.commitSha,
+    f.github, f.git, upstream);
+  assert.ok(f.releases.get('v1.0.3').body.includes(`<!-- cindy-upstream-release ${JSON.stringify(upstream)} -->`));
+  await assert.rejects(publishPersonalRelease(f.options.outputDir, f.options.repository, f.options.runId, f.options.commitSha,
+    f.github, () => false, upstream), /not in publication source/);
+});

@@ -224,7 +224,12 @@ async function publishLegacyPointers(outputDir, repository, manifests, legacyTag
 }
 
 /** GH_TOKEN exists only in this publication job. It is never written into assets. */
-export async function publishPersonalRelease(outputDir, repository, runId, commitSha, github = gh, git = runGit) {
+export async function publishPersonalRelease(outputDir, repository, runId, commitSha, github = gh, git = runGit, upstreamRelease = null) {
+  if (upstreamRelease !== null) {
+    requireValue(Number.isSafeInteger(upstreamRelease.releaseId) && /^v\d+\.\d+\.\d+$/.test(upstreamRelease.tag)
+      && /^[a-f0-9]{40}$/.test(upstreamRelease.commitSha), 'Invalid upstream release identity');
+    requireValue(git(['merge-base', '--is-ancestor', upstreamRelease.commitSha, commitSha]), 'Upstream release is not in publication source');
+  }
   const pointers = PLATFORMS.map(platform => `manifest-${platform}-x64.json`);
   const manifests = await Promise.all(pointers.map(name => fs.readFile(path.join(outputDir, name), 'utf8').then(JSON.parse)));
   const version = manifests[0].app.version;
@@ -289,6 +294,7 @@ export async function publishPersonalRelease(outputDir, repository, runId, commi
   if (!release || release.isDraft) {
     notes = prepareReleaseNotes(repository, version, commitSha, previousTag === tag ? undefined : previousTag, github, git);
     notes.body += `\n\n<!-- cindy-personal-release ${JSON.stringify({ runId: String(runId), sourceCommit: commitSha })} -->`;
+    if (upstreamRelease) notes.body += `\n<!-- cindy-upstream-release ${JSON.stringify(upstreamRelease)} -->`;
     const history = JSON.parse(github(['release', 'list', '--repo', repository, '--limit', '1000', '--json', 'tagName,isDraft']));
     const versions = history.filter(item => !item.isDraft && /^v1\.0\.[1-9][0-9]*$/.test(item.tagName))
       .map(item => item.tagName.slice(1));
@@ -361,6 +367,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     await preparePersonalRelease({ inputDir: first, outputDir: second, repository,
       version: process.env.PERSONAL_VERSION, runId, commitSha });
   } else if (command === 'publish' && first) {
-    await publishPersonalRelease(first, repository, runId, commitSha);
+    await publishPersonalRelease(first, repository, runId, commitSha, gh, runGit,
+      process.env.PERSONAL_UPSTREAM_RELEASE ? JSON.parse(process.env.PERSONAL_UPSTREAM_RELEASE) : null);
   } else throw new Error('Usage: personal-desktop-release.mjs plan | prepare <downloads> <new-output> | publish <output>');
 }
+
