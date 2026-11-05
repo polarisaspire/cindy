@@ -217,3 +217,13 @@ test('a transient existing CI failure retries the original attempt once', async 
   assert.equal(f.state.runs[0].run_attempt, 2);
   assert.equal(f.state.latest.tag_name, 'v1.0.13');
 });
+
+
+test('read-only CI inspection reports a pending release without mutation or dispatch', async () => {
+  const f = fixture();
+  await syncStableReleases(f.runtime, { readOnly: true });
+  assert.equal(f.state.runs.length, 0);
+  assert.equal(f.state.remote, head);
+  assert.ok(!f.state.calls.some(call => call[0] === 'git' && ['merge', 'push', 'config'].includes(call[1])));
+  assert.ok(f.state.calls.some(call => call[0] === 'report' && call[1].includes('Pending official releases')));
+});

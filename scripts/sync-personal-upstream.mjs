@@ -170,7 +170,7 @@ export function publicationGate({ sourceSha, expectedSha = '', upstreamTag = '',
   return { proceed: !sourceIncludes(runtime, latest?.sha, upstream.commitSha), upstream };
 }
 
-export async function syncStableReleases(runtime, { hasSyncToken = false } = {}) {
+export async function syncStableReleases(runtime, { hasSyncToken = false, readOnly = false } = {}) {
   const deadline = runtime.now() + 320 * 60_000;
   requireValue(process.env.GITHUB_REPOSITORY === undefined || process.env.GITHUB_REPOSITORY === REPOSITORY, 'Wrong fork');
   const upstream = stableReleases(runtime.api(`repos/${UPSTREAM}/releases?per_page=100`, { paginate: true }));
@@ -187,6 +187,10 @@ export async function syncStableReleases(runtime, { hasSyncToken = false } = {})
     pending.push(identity);
   }
   if (!pending.length) { runtime.report(`Already published through ${upstream[0].tag_name}; no build or release created.`); return; }
+  if (readOnly) {
+    runtime.report(`Pending official releases (read-only): ${pending.map(item => item.tag).reverse().join(', ')}`);
+    return;
+  }
   runtime.git(['config', 'user.name', 'github-actions[bot]']);
   runtime.git(['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
   // Oldest first: every intervening formal release gets a build, never a beta/main snapshot.
@@ -240,8 +244,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, output);
       else process.stdout.write(output);
       if (!result.proceed) runtime.report('This upstream release is already published; skipping duplicate packaging and publication.');
-    } else if (process.argv[2] === 'sync') await syncStableReleases(runtime, { hasSyncToken: process.env.HAS_SYNC_TOKEN === 'true' });
-    else throw new Error('Usage: sync-personal-upstream.mjs sync | gate');
+    } else if (['sync', 'inspect'].includes(process.argv[2])) await syncStableReleases(runtime, {
+      hasSyncToken: process.env.HAS_SYNC_TOKEN === 'true', readOnly: process.argv[2] === 'inspect',
+    });
+    else throw new Error('Usage: sync-personal-upstream.mjs sync | inspect | gate');
   } catch (error) {
     runtime.report(`Synchronization/publication stopped: ${error.message}`);
     process.exitCode = 1;
