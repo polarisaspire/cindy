@@ -325,3 +325,29 @@ test('automatic publication records the verified official release identity', asy
   await assert.rejects(publishPersonalRelease(f.options.outputDir, f.options.repository, f.options.runId, f.options.commitSha,
     f.github, () => false, upstream), /not in publication source/);
 });
+
+
+// A later main commit or failed CI during uploads must not advance update feeds.
+test('source invalidated during asset upload stops before mutable pointers or Latest', async t => {
+  const f = await publisherFixture(t);
+  await assert.rejects(publishPersonalRelease(f.options.outputDir, f.options.repository, f.options.runId, f.options.commitSha,
+    f.github, f.git, null, () => { throw new Error('main changed after review'); }), /main changed/);
+  assert.equal(f.latest(), undefined);
+  assert.equal(f.releases.get('v1.0.3').isDraft, true);
+  assert.equal(JSON.parse(f.releases.get('personal-latest').files.get('manifest-win32-x64.json')).app.version, '1.0.2');
+});
+
+
+test('source invalidated during legacy mirroring leaves compatibility pointers unchanged', async t => {
+  const f = await publisherFixture(t); let invalidated = false;
+  const github = args => {
+    const result = f.github(args);
+    if (args[1] === 'upload' && args[2] === 'personal-123456') invalidated = true;
+    return result;
+  };
+  await assert.rejects(publishPersonalRelease(f.options.outputDir, f.options.repository, f.options.runId, f.options.commitSha,
+    github, f.git, null, () => { if (invalidated) throw new Error('main moved during mirror'); }), /during mirror/);
+  assert.equal(f.latest(), undefined);
+  assert.equal(f.releases.get('v1.0.3').isDraft, true);
+  assert.equal(JSON.parse(f.releases.get('personal-latest').files.get('manifest-win32-x64.json')).app.version, '1.0.2');
+});

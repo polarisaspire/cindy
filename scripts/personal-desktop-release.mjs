@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { createRuntime, publicationGate } from './sync-personal-upstream.mjs';
 
 const PLATFORMS = ['win32', 'linux'];
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -190,7 +191,7 @@ export function prepareReleaseNotes(repository, version, commitSha, previousTag,
 /** 1.0.6 only accepts personal-<digits> paths. Add new filenames to its existing
  * release, without replacing any published archive or creating another feed release.
  * Keep this mirror for old installations; new clients read releases/latest instead. */
-async function publishLegacyPointers(outputDir, repository, manifests, legacyTag, github) {
+async function publishLegacyPointers(outputDir, repository, manifests, legacyTag, github, beforePromote) {
   const release = releaseInfo(repository, legacyTag, github);
   requireValue(release && !release.isDraft, 'Legacy download release is unavailable');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-legacy-update-'));
@@ -217,6 +218,9 @@ async function publishLegacyPointers(outputDir, repository, manifests, legacyTag
     const { version } = manifests[0].app;
     const notes = `此入口供 Cindy 1.0.6 检查更新使用。最新正式版本：https://github.com/${repository}/releases/latest\n\n`
       + `<!-- cindy-personal-update ${JSON.stringify({ version, sourceCommit: manifests[0].sourceCommit })} -->`;
+    // Legacy archives can be large too; validate after mirroring, immediately
+    // before this mutable compatibility feed becomes visible.
+    beforePromote();
     github(['release', 'edit', 'personal-latest', '--repo', repository, '--title', '1.0.6 旧版更新兼容入口', '--notes', notes]);
     github(['release', 'upload', 'personal-latest', '--repo', repository, '--clobber',
       ...manifests.map(value => path.join(dir, `manifest-${value.platformKey}.json`))]);
@@ -224,7 +228,7 @@ async function publishLegacyPointers(outputDir, repository, manifests, legacyTag
 }
 
 /** GH_TOKEN exists only in this publication job. It is never written into assets. */
-export async function publishPersonalRelease(outputDir, repository, runId, commitSha, github = gh, git = runGit, upstreamRelease = null) {
+export async function publishPersonalRelease(outputDir, repository, runId, commitSha, github = gh, git = runGit, upstreamRelease = null, beforePromote = () => {}) {
   if (upstreamRelease !== null) {
     requireValue(Number.isSafeInteger(upstreamRelease.releaseId) && /^v\d+\.\d+\.\d+$/.test(upstreamRelease.tag)
       && /^[a-f0-9]{40}$/.test(upstreamRelease.commitSha), 'Invalid upstream release identity');
@@ -338,6 +342,9 @@ export async function publishPersonalRelease(outputDir, repository, runId, commi
       }
     } finally { await fs.rm(original, { recursive: true, force: true }); }
   }
+  // Uploads can take time. Revalidate the reviewed source before exposing any
+  // mutable update pointer, and once more before canonical Latest promotion.
+  beforePromote();
   if (legacyTag) {
     // Use immutable originals on a retry, including their original archive bytes.
     const published = await Promise.all(pointers.map(name => fs.readFile(path.join(outputDir, name), 'utf8').then(JSON.parse)));
@@ -349,9 +356,10 @@ export async function publishPersonalRelease(outputDir, repository, runId, commi
           github(['release', 'download', tag, '--repo', repository, '--dir', mirrorDir, '--pattern', asset.file.split('/')[1]]);
         }
       }
-      await publishLegacyPointers(archiveDir, repository, published, legacyTag, github);
+      await publishLegacyPointers(archiveDir, repository, published, legacyTag, github, beforePromote);
     } finally { await fs.rm(mirrorDir, { recursive: true, force: true }); }
   }
+  beforePromote();
   github(['release', 'edit', tag, '--repo', repository, '--draft=false', '--prerelease=false', '--latest']);
   console.log(`Published ${version}: https://github.com/${repository}/releases/tag/${tag}`);
 }
@@ -368,7 +376,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       version: process.env.PERSONAL_VERSION, runId, commitSha });
   } else if (command === 'publish' && first) {
     await publishPersonalRelease(first, repository, runId, commitSha, gh, runGit,
-      process.env.PERSONAL_UPSTREAM_RELEASE ? JSON.parse(process.env.PERSONAL_UPSTREAM_RELEASE) : null);
+      process.env.PERSONAL_UPSTREAM_RELEASE ? JSON.parse(process.env.PERSONAL_UPSTREAM_RELEASE) : null,
+      () => {
+        const checked = publicationGate({ sourceSha: commitSha, expectedSha: process.env.EXPECTED_SOURCE_SHA,
+          upstreamTag: process.env.UPSTREAM_TAG, requestRef: process.env.PUBLICATION_REQUEST || '', runId }, createRuntime());
+        requireValue(checked.proceed, 'Source already published; stopping stale promotion');
+      });
   } else throw new Error('Usage: personal-desktop-release.mjs plan | prepare <downloads> <new-output> | publish <output>');
 }
 

@@ -1,7 +1,11 @@
 name: Personal desktop packages
-run-name: ${{ inputs.upstream_tag && !inputs.validate_only && format('Stable {0} @ {1}', inputs.upstream_tag, github.sha) || format('Personal desktop @ {0}', github.sha) }}
+run-name: ${{ github.event_name == 'push' && format('Reviewed main @ {0}', github.sha) || inputs.upstream_tag && !inputs.validate_only && format('Stable {0} @ {1}', inputs.upstream_tag, github.sha) || format('Personal desktop @ {0}', github.sha) }}
 
 on:
+  # Never main pushes or a schedule: this is an explicit review-complete request.
+  push:
+    branches:
+      - 'automation/personal-release/**'
   workflow_dispatch:
     inputs:
       validate_only:
@@ -29,7 +33,7 @@ concurrency:
 jobs:
   plan:
     name: Select version from published releases
-    if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.validate_only)
+    if: github.repository == 'polarisaspire/cindy' && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.validate_only)) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/automation/personal-release/')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -50,7 +54,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
           UPSTREAM_TAG: ${{ inputs.upstream_tag }}
-          VALIDATE_ONLY: ${{ inputs.validate_only }}
+          VALIDATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.validate_only }}
+          PUBLICATION_REQUEST: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: node scripts/sync-personal-upstream.mjs gate
       - name: Select next release or resume this run
         if: steps.gate.outputs.proceed == 'true'
@@ -228,7 +233,7 @@ jobs:
   publish:
     name: Publish verified personal updates
     needs: [plan, package, linux-compatibility]
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main' && !inputs.validate_only && needs.plan.outputs.proceed == 'true'
+    if: github.repository == 'polarisaspire/cindy' && needs.plan.outputs.proceed == 'true' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.validate_only) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/automation/personal-release/')))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -236,7 +241,6 @@ jobs:
       actions: read
     env:
       PERSONAL_VERSION: ${{ needs.plan.outputs.version }}
-      PERSONAL_UPSTREAM_RELEASE: ${{ needs.plan.outputs.upstream_release }}
     concurrency:
       group: personal-update-publication
       cancel-in-progress: false
@@ -264,10 +268,15 @@ jobs:
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
           UPSTREAM_TAG: ${{ inputs.upstream_tag }}
           VALIDATE_ONLY: 'false'
+          PUBLICATION_REQUEST: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: node scripts/sync-personal-upstream.mjs gate
       - name: Publish versioned release and preserve legacy updates
         if: steps.final_gate.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          PERSONAL_UPSTREAM_RELEASE: ${{ steps.final_gate.outputs.upstream_release }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          PUBLICATION_REQUEST: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: node scripts/personal-desktop-release.mjs publish personal-release
 

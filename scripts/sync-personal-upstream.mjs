@@ -133,47 +133,66 @@ async function ensureCI(runtime, sha, deadline) {
   }
   await waitRun(runtime, run, deadline, previousAttempt);
 }
-async function packageRelease(runtime, identity, sha, deadline, recoveryRun) {
-  const title = `Stable ${identity.tag} @ ${sha}`;
-  let run = recoveryRun ?? runs(runtime, 'personal-desktop.yml', sha).find(item => item.display_title === title);
-  if (!run) run = await dispatch(runtime, 'personal-desktop.yml', sha, {
-    validate_only: false, expected_sha: sha, upstream_tag: identity.tag,
-  }, deadline, title);
-  let previousAttempt = 0;
-  if (run.status === 'completed' && run.conclusion !== 'success') {
-    previousAttempt = run.run_attempt ?? 1;
-    // Rebuild the original runId/source, including artifacts that may have expired.
-    // Run-scoped upload-artifact overwrite never touches published Release assets.
-    runtime.api(`repos/${REPOSITORY}/actions/runs/${run.id}/rerun`, { method: 'POST' });
-  }
-  runtime.report(`Building ${identity.tag} from ${sha}: ${run.html_url}`);
-  await waitRun(runtime, run, deadline, previousAttempt);
-  const published = publishedSource(runtime);
-  requireValue(sourceIncludes(runtime, published?.sha, identity.commitSha),
-    `Build finished without a published release containing ${identity.tag}; inspect ${run.html_url}`);
-  runtime.report(`Published ${identity.tag}: ${published.release.html_url}`);
-}
-
 /** Called inside serialized packaging, including manual publication. */
-export function publicationGate({ sourceSha, expectedSha = '', upstreamTag = '', validateOnly = false }, runtime) {
+export function publicationGate({ sourceSha, expectedSha = '', upstreamTag = '', validateOnly = false, requestRef = '', runId = '' }, runtime) {
   requireValue(SHA.test(sourceSha), 'Invalid source SHA');
   if (expectedSha) requireValue(expectedSha === sourceSha, 'main moved: expected source SHA does not match this run');
+  if (requestRef) {
+    requireValue(requestRef === `automation/personal-release/${sourceSha}`, 'Release request must name its exact source SHA');
+    requireValue(runtime.api(`repos/${REPOSITORY}/git/ref/heads/main`).object.sha === sourceSha,
+      'main changed after review; review the final source and create a new release request');
+  }
   if (validateOnly) return { proceed: true, upstream: null };
   requireValue(successfulCI(runtime, sourceSha), 'Exact-source client-ci has not passed; publication is blocked');
-  if (!upstreamTag) return { proceed: true, upstream: null };
-  requireValue(expectedSha && STABLE.test(upstreamTag), 'Automatic publication needs an expected SHA and stable upstream tag');
-  const upstream = releaseIdentity(runtime.api(`repos/${UPSTREAM}/releases/tags/${upstreamTag}`), runtime);
-  requireValue(sourceIncludes(runtime, sourceSha, upstream.commitSha), 'Build source does not contain the selected upstream release');
   const catalog = runtime.api(`repos/${REPOSITORY}/releases?per_page=100`, { paginate: true });
-  checkRecordedIdentity(upstream, catalog);
   const latest = publishedSource(runtime);
-  return { proceed: !sourceIncludes(runtime, latest?.sha, upstream.commitSha), upstream };
+  if (requestRef && sourceIncludes(runtime, latest?.sha, sourceSha)) return { proceed: false, upstream: null };
+  let upstream = null;
+  if (requestRef) {
+    const drafts = catalog.filter(item => item.draft && PERSONAL.test(item.tag_name));
+    const owned = drafts.filter(item => {
+      const owner = marker(item.body, 'cindy-personal-release');
+      return owner?.runId === String(runId) && owner.sourceCommit === sourceSha;
+    });
+    requireValue(drafts.length === owned.length && owned.length <= 1,
+      'An unfinished release belongs to another run or source; recover it first');
+    if (owned.length) {
+      // A retry resumes its reviewed batch, even if another formal release has
+      // appeared meanwhile. Otherwise draft recovery and staging would deadlock.
+      const recorded = marker(owned[0].body, 'cindy-upstream-release');
+      requireValue(recorded && STABLE.test(recorded.tag), 'Draft has no recorded upstream identity');
+      upstream = releaseIdentity(runtime.api(`repos/${UPSTREAM}/releases/tags/${recorded.tag}`), runtime);
+      requireValue(recorded.releaseId === upstream.releaseId && recorded.commitSha === upstream.commitSha,
+        'Draft upstream release identity changed');
+    } else {
+      const newest = stableReleases(runtime.api(`repos/${UPSTREAM}/releases?per_page=100`, { paginate: true }))[0];
+      upstream = releaseIdentity(newest, runtime);
+    }
+  } else if (upstreamTag) {
+    requireValue(expectedSha && STABLE.test(upstreamTag), 'Automatic publication needs an expected SHA and stable upstream tag');
+    upstream = releaseIdentity(runtime.api(`repos/${UPSTREAM}/releases/tags/${upstreamTag}`), runtime);
+  }
+  if (upstream) {
+    checkRecordedIdentity(upstream, catalog);
+    requireValue(sourceIncludes(runtime, sourceSha, upstream.commitSha), 'Build source does not contain the selected upstream release');
+  }
+  // A reviewed personal PR may require a release on an already-shipped upstream
+  // baseline. Explicit requests deduplicate by source, never by upstream tag alone.
+  return { proceed: requestRef || !upstream ? true : !sourceIncludes(runtime, latest?.sha, upstream.commitSha), upstream };
 }
 
-export async function syncStableReleases(runtime, { hasSyncToken = false, readOnly = false } = {}) {
-  const deadline = runtime.now() + 320 * 60_000;
+export async function syncStableReleases(runtime, { hasSyncToken = false, readOnly = false, requestRef = '', sourceSha = '' } = {}) {
+  const deadline = runtime.now() + 75 * 60_000;
   requireValue(process.env.GITHUB_REPOSITORY === undefined || process.env.GITHUB_REPOSITORY === REPOSITORY, 'Wrong fork');
-  const upstream = stableReleases(runtime.api(`repos/${UPSTREAM}/releases?per_page=100`, { paginate: true }));
+  let upstream = stableReleases(runtime.api(`repos/${UPSTREAM}/releases?per_page=100`, { paginate: true }));
+  if (requestRef) {
+    const match = requestRef.match(/^automation\/upstream-sync\/(v\d+\.\d+\.\d+)\/([a-f0-9]{40})$/);
+    requireValue(match && match[2] === sourceSha && sourceIncludes(runtime, runtime.git(['rev-parse', 'HEAD']), sourceSha),
+      'Upstream synchronization request source is not in main');
+    const index = upstream.findIndex(release => release.tag_name === match[1]);
+    requireValue(index >= 0, 'Requested official release is not stable or no longer exists');
+    upstream = upstream.slice(index);
+  }
   requireValue(upstream.length > 0, 'No official stable releases found');
   const forkCatalog = runtime.api(`repos/${REPOSITORY}/releases?per_page=100`, { paginate: true });
   const latest = publishedSource(runtime);
@@ -193,24 +212,13 @@ export async function syncStableReleases(runtime, { hasSyncToken = false, readOn
   }
   runtime.git(['config', 'user.name', 'github-actions[bot]']);
   runtime.git(['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
-  // Oldest first: every intervening formal release gets a build, never a beta/main snapshot.
+  // Stage official tags oldest-first. The controller reviews personal PRs next;
+  // staging must never dispatch packaging or publish anything.
   for (const identity of pending.reverse()) {
-    const current = publishedSource(runtime);
-    if (sourceIncludes(runtime, current?.sha, identity.commitSha)) continue;
     const currentCatalog = runtime.api(`repos/${REPOSITORY}/releases?per_page=100`, { paginate: true });
     checkRecordedIdentity(identity, currentCatalog);
-    const draft = currentCatalog.find(item => item.draft && PERSONAL.test(item.tag_name));
-    if (draft) {
-      const owner = marker(draft.body, 'cindy-personal-release');
-      requireValue(owner && /^\d+$/.test(owner.runId) && SHA.test(owner.sourceCommit), 'Unrecognized unfinished release; inspect it before continuing');
-      requireValue(sourceIncludes(runtime, owner.sourceCommit, identity.commitSha), 'An earlier unfinished release must be recovered first');
-      const run = runtime.api(`repos/${REPOSITORY}/actions/runs/${owner.runId}`);
-      requireValue(run.path === '.github/workflows/personal-desktop.yml' && run.head_sha === owner.sourceCommit,
-        'Unfinished release workflow identity mismatch');
-      await ensureCI(runtime, owner.sourceCommit, deadline);
-      await packageRelease(runtime, identity, owner.sourceCommit, deadline, run);
-      continue;
-    }
+    requireValue(!currentCatalog.some(item => item.draft && PERSONAL.test(item.tag_name)),
+      'An unfinished release must be resolved before main advances');
     runtime.git(['fetch', '--no-tags', 'origin', 'main']);
     const before = runtime.git(['rev-parse', 'origin/main']);
     requireValue(runtime.git(['rev-parse', 'HEAD']) === before, 'main advanced during synchronization; rerun from its current head');
@@ -228,10 +236,11 @@ export async function syncStableReleases(runtime, { hasSyncToken = false, readOn
     }
     const sha = runtime.git(['rev-parse', 'HEAD']);
     requireValue(runtime.api(`repos/${REPOSITORY}/git/ref/heads/main`).object.sha === sha, 'Remote main differs from merged source');
-    runtime.report(`Synchronized ${identity.tag} at ${sha}; waiting for exact-source CI.`);
-    await ensureCI(runtime, sha, deadline);
-    await packageRelease(runtime, identity, sha, deadline);
+    runtime.report(`Staged ${identity.tag} at ${sha}; no package or release requested.`);
   }
+  const sha = runtime.git(['rev-parse', 'HEAD']);
+  await ensureCI(runtime, sha, deadline);
+  runtime.report(`Upstream staging and exact-source CI complete at ${sha}. Review personal PRs before requesting publication.`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
@@ -239,15 +248,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   try {
     if (process.argv[2] === 'gate') {
       const result = publicationGate({ sourceSha: process.env.GITHUB_SHA, expectedSha: process.env.EXPECTED_SOURCE_SHA,
-        upstreamTag: process.env.UPSTREAM_TAG, validateOnly: process.env.VALIDATE_ONLY === 'true' }, runtime);
+        upstreamTag: process.env.UPSTREAM_TAG, validateOnly: process.env.VALIDATE_ONLY === 'true', requestRef: process.env.PUBLICATION_REQUEST || '', runId: process.env.GITHUB_RUN_ID }, runtime);
       const output = `proceed=${result.proceed}\nupstream_release=${JSON.stringify(result.upstream)}\n`;
       if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, output);
       else process.stdout.write(output);
-      if (!result.proceed) runtime.report('This upstream release is already published; skipping duplicate packaging and publication.');
-    } else if (['sync', 'inspect'].includes(process.argv[2])) await syncStableReleases(runtime, {
+      if (!result.proceed) runtime.report('This source or upstream release is already published; skipping duplicate packaging and publication.');
+    } else if (['stage', 'inspect'].includes(process.argv[2])) await syncStableReleases(runtime, {
       hasSyncToken: process.env.HAS_SYNC_TOKEN === 'true', readOnly: process.argv[2] === 'inspect',
+      requestRef: process.env.SYNC_REQUEST || '', sourceSha: process.env.GITHUB_SHA || '',
     });
-    else throw new Error('Usage: sync-personal-upstream.mjs sync | inspect | gate');
+    else throw new Error('Usage: sync-personal-upstream.mjs stage | inspect | gate');
   } catch (error) {
     runtime.report(`Synchronization/publication stopped: ${error.message}`);
     process.exitCode = 1;

@@ -1,8 +1,10 @@
 name: Sync personal Cindy from upstream
 
 on:
-  schedule:
-    - cron: '23 20 * * *' # Daily 04:23 Asia/Shanghai; GitHub may delay scheduled runs.
+  # Explicit staging requests only. The daily controller owns ordering/review.
+  push:
+    branches:
+      - 'automation/upstream-sync/**'
   workflow_dispatch:
 
 permissions:
@@ -15,10 +17,10 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main'
+    if: github.repository == 'polarisaspire/cindy' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/automation/upstream-sync/'))
     runs-on: ubuntu-24.04
-    # The controller waits for complete CI, both packages and final publication.
-    timeout-minutes: 330
+    # Staging waits for CI but can never request an installer or release.
+    timeout-minutes: 85
     steps:
       - name: Checkout the maintained main branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,12 +34,13 @@ jobs:
           node-version: 22
       - name: Verify release synchronization regressions
         run: node --test scripts/__tests__/sync-personal-upstream.test.mjs
-      - name: Synchronize official stable releases and publish verified packages
+      - name: Stage official stable releases without publishing
         env:
           GH_TOKEN: ${{ github.token }}
           HAS_SYNC_TOKEN: ${{ secrets.PERSONAL_SYNC_TOKEN != '' }}
-        run: node scripts/sync-personal-upstream.mjs sync
+          SYNC_REQUEST: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: node scripts/sync-personal-upstream.mjs stage
       - name: Report incomplete synchronization
         if: failure() || cancelled()
         run: |
-          echo '::error::Stable release synchronization did not finish. Inspect the summary and linked CI/package run. The previous published version remains available; do not create a replacement draft.'
+          echo '::error::Upstream staging did not finish. Inspect the summary and CI run. This workflow never publishes; the previous released version remains available.'

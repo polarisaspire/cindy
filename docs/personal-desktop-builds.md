@@ -4,10 +4,10 @@
 
 ## 分支与首次启用
 
-1. 将已审阅的自用修改通过 PR 合入自己 fork 的 `main`，自动触发 `client-ci` 测试；普通个人改动不因此发布客户端。上游正式版由下面的每日同步入口处理。
+1. 将已审阅的自用修改通过 PR 合入自己 fork 的 `main`，自动触发 `client-ci` 测试；普通个人改动不因此发布客户端。上游正式版及维护者自己的 PR 由下面的统一维护流程处理，普通 main push 不直接发布。
 2. 在自己的 fork 打开 Actions，若尚未启用 Actions，先启用。
-3. 将 `.github/workflows/personal-desktop.yml` 与 `.github/workflows/sync-personal-upstream.yml` 通过 PR 放入自己 fork 的默认分支，注册手动与定时入口。直连修复、自用更新源码、发布脚本和工作流统一放在自己的 `main`；日常构建和发布不再依赖历史修复分支。手动运行时选择 `main`。
-4. 维护者已授权每日跟踪上游正式 Release 并发布 Windows / Linux 自用构建。需要额外手动发布个人改动时，手动运行 **Personal desktop packages**，选择 `main` 并取消勾选默认开启的 `validate_only`。等两平台打包及 Debian 12 安装验证成功后，才会发布。只想验证安装包时保留勾选，完成后在该次运行的 Artifacts 下载候选包。
+3. 将 `.github/workflows/personal-desktop.yml` 与 `.github/workflows/sync-personal-upstream.yml` 通过 PR 放入自己 fork 的默认分支，注册手动与受控请求入口。直连修复、自用更新源码、发布脚本和工作流统一放在自己的 `main`；日常构建和发布不再依赖历史修复分支。手动运行时选择 `main`。
+4. 维护者已授权每日同步上游正式 Release，检查并合入自己提交到本 fork main 的非 draft PR，完成后发布 Windows / Linux 自用构建。需要额外手动发布个人改动时，手动运行 **Personal desktop packages**，选择 `main` 并取消勾选默认开启的 `validate_only`。等两平台打包及 Debian 12 安装验证成功后，才会发布。只想验证安装包时保留勾选，完成后在该次运行的 Artifacts 下载候选包。
 
 构建矩阵为 Windows x64 `Setup.exe` 和 Linux x64 `.deb`；目前固定 `global`。bp-holder 安装前先核对 `uname -m` 与系统发行版，arm64 不能安装 x64 包。
 
@@ -27,23 +27,39 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 ## 后续自动同步与发布
 
-默认分支上的 **Sync personal Cindy from upstream** 每日北京时间 04:23（GitHub 可能延迟）及手动触发时检查官方 GitHub Releases，只接受非 draft、非 prerelease 的 `v主.次.补丁` 正式版本，不再合并官方 main 的开发快照。实现与回归入口为 `scripts/sync-personal-upstream.mjs` 和 `scripts/__tests__/sync-personal-upstream.test.mjs`。
+每日维护由一个控制器统一执行。仓库不再保留独立 cron，也不在普通 main push 时发布，避免上游刚合入、个人 PR 尚未审完就提前出包。`client-ci` 仍按既有 main push / PR 入口运行。
 
-控制器按正式版本号检查上游当前发布线，遇到已发布自用版本包含的上游祖先基线后停止向更早版本回溯；存在多个新正式版时按版本先后逐个合并、测试、构建和发布。判断基准是已发布自用 Release 的实际 tag 提交与完整资产，而不是“main 已合并”：构建或发布失败不会被次日当成已完成。没有新正式版时不触发 CI、打包或重复发布，也不因工作流自身变更递增客户端版本。
+### 第一阶段：同步正式版，只验证不发布
 
-同步对自己的 main 执行带 DCO 的普通 merge 和非强制 push，保留 fork 修改；发生冲突则 abort、不推送、不发布，Actions 失败日志和摘要给出具体文件。上游 tag 通过实际提交解析（支持 annotated tag），获取后再次核对 SHA；新发布的 Release 正文记录上游 release ID、tag、commit SHA，已记录身份发生改变时停止。上游 release 的 target_commitish 或移动的 main 不作为构建来源。
+控制器查询官方 `makecindy/cindy` 的非 draft、非 prerelease 正式 `v主.次.补丁` Release。需要同步时，将当前 main 的完整 SHA 记为 `<base>`，在本 fork 创建一次性分支 `automation/upstream-sync/<上游tag>/<base>`，目标必须为 `<base>`。已存在同名请求时读取原 Actions run，不重复创建或强推。这个显式请求触发 **Sync personal Cindy from upstream**，也可在 main 手动 dispatch 此暂存工作流。
 
-上游经常修改 `.github/workflows/`；GitHub 默认 job token 无权推送这类文件。无人值守完整同步沿用 fork 的 `PERSONAL_SYNC_TOKEN`，只授予本 fork 的 **Contents、Workflows: Read and write**。值由用户在 GitHub 直接填写，不写进代码、聊天、安装包或清单。PAT 仅供 checkout/push；CI dispatch、构建和发布使用 job token。缺少令牌时普通代码更新可同步，涉及 workflow 则在 push 前停止，不丢弃上游文件。
+工作流通过实际 tag 提交（支持 annotated tag）解析来源并核对 fetch 后的 SHA，不使用 target_commitish 或官方 main 开发快照。请求源码必须仍在 main 历史中，正常重跑可保留此前已经合入的结果。新正式版本按顺序以带 DCO 的普通 merge 合入 main，不 reset、不强推、不丢弃 fork 修改；冲突 abort，不推送失败结果。既有未完成 Release draft 会阻止 main 继续前进，先由控制器处理恢复或报告决定点。
 
-同步捕获并核对远端源码 SHA，等待该 SHA 的 `client-ci` 全部成功后才 dispatch 安装包工作流，并传入 `expected_sha` 和 `upstream_tag`。`Personal desktop packages` 在串行的 plan job 内再次核验事件 SHA、完整 CI、正式上游身份和祖先关系；main 在 dispatch 间隙变化即失败，不把检查过的 A 提交替换成 B。人工正式发布也要求该提交的完整 CI 成功。所有 checkout、artifact、build-info、清单及发布标签继续使用固定的事件 SHA。
+暂存只等待最终源码的完整 `client-ci`，**任何路径都不会请求安装包或发布 Release**。无新正式版时直接结束。旧版已发布源码作为祖先基线，避免重复处理已包含版本；CI 同时使用只读 `inspect` 入口核验真实 Release/tag 关系。实现与测试见 `scripts/sync-personal-upstream.mjs`、`scripts/__tests__/sync-personal-upstream.test.mjs`。
 
-控制器复用已经存在的同上游／同源码构建，不重复 dispatch；API 返回不确定时停止并在下一次读取已有 runs 后继续。已失败 CI 重跑原 run 的失败 jobs 一次；安装包失败则完整重跑原 run，保留 runId、源码及原版本号，同时重新生成可能已过期的 run artifacts。`upload-artifact` 仅替换同 run 的候选产物，绝不覆盖已发布的安装包。再次失败就停止；摘要保留具体 CI／构建链接。已有待发 draft 必须先恢复其原 run，不能用新版本跳过。控制器最长等待约 320 分钟；超时不等于完成，次日从已有状态继续。
+上游修改 `.github/workflows/` 时沿用 `PERSONAL_SYNC_TOKEN`，仅授权本 fork 的 **Contents、Workflows: Read and write**。用户在 GitHub 填写凭证，不写进源码或产物。PAT 仅供 checkout/push，CI 与发布仍用 job token；未配置且出现 workflow 改动则在 push 前停止。
 
-定时与手动入口要求文件位于默认分支；部署到 main 后以 main 为唯一正式分发来源。GitHub 定时任务可能延迟，也可能因公开仓库长期无活动而停用，应在 Actions 中检查运行状态。历史修复分支不触发正式发布。
+### 第二阶段：检查维护者自己的 fork PR
 
-合并前可手动选择候选分支并保留默认勾选的 `validate_only`，只构建和上传 Artifact，不改变安装中的版本和更新指针。需要额外正式发布个人改动时，在 main 取消勾选。自动正式版同步使用同一工作流及全部既有门禁；不会自动替用户安装或重启客户端。
+控制器只处理作者为本 fork 维护者、目标为 `polarisaspire/cindy:main` 的 PR，不操作提交到官方仓库的 PR。逐个阅读最终 diff、讨论和审核结果，核对相关规则与 CI；draft、冲突、未解决的反对意见、必须等待的审批或不安全改动不自动合入。检查通过后使用预期 head SHA 合并，若 head/base 改变则重新检查。代码检查不等于替维护者提交 GitHub APPROVE 审核；需要明确审批时报告给维护者。
 
-Release 继续使用单调递增的 `1.0.<patch>`，按已发布正式版本计算下一号，patch 最大 65535；验证、失败和取消不占号。整个安装包工作流从版本选择到发布串行，避免手动与自动发布抢号；plan 在锁内再次判断该上游是否已发布，重复请求直接跳过。正式 Release 保留隐藏 run/source 标记，同一 run 重跑沿用原版本（包括上传中断的 draft）。旧 run 不回退新更新指针，同一版本不覆盖已发布资产；恢复时使用原始清单与归档。分发清单的仓库、平台、源码 SHA、大小与 SHA256 任一不一致即停止。
+上游与所有本轮可合入 PR 处理结束后，读取最终 main SHA 并等待该 SHA 的完整 `client-ci` 成功。仍有阻塞项时说明原因与处理结果；未经本轮检查的后续源码不能混入发版。安装包构建只验证待发布源码，不替代代码审查或 PR 合并判断。
+
+### 第三阶段：明确请求最终源码发布
+
+仅在第二阶段结束后，控制器在本 fork 创建 `automation/personal-release/<完整final-SHA>` 分支，目标必须正是当前 main 的 `<final-SHA>`。这是一次性、绑定源码的“本轮检查完成”信号，不是普通 main push。无实际待发布客户端变更、仅部署本维护配置时不创建请求，也不为已包含的上游版本重复发版。
+
+此请求触发 **Personal desktop packages**。plan job 验证分支名中的 SHA、事件源码、当前 main、完整 `client-ci` 以及最新官方正式版的祖先关系；同一源码已发布则直接跳过。个人 PR 即使基于已经发布过的上游版本，也可按新的最终源码发版。构建、Artifact、build-info、SOURCE、清单及标签统一使用固定事件 SHA。发布前再次核对 main 与 CI；main 变化或检查失败就停止，控制器必须重新检查最终源码，再提交新的请求。
+
+工作流只构建 Windows x64 和 Linux x64，保留全部测试、packaged smoke、干净 Debian 12 安装、SHA256 与双平台一致性门禁。两平台全部通过后才更新 fork Release 与既有兼容清单，不自动安装或重启客户端。
+
+### 并发、恢复与结果确认
+
+安装包工作流仍全程串行，版本按已发布正式版单调递增 `1.0.<patch>`（上限 65535）；失败和验证不占号。请求分支以源码 SHA 命名，重复请求读取同一个 run。构建或上传中断时，先核对原 run/source 与 draft，再重跑原 run，保持版本号。已创建 draft 的同 run、同源码恢复使用 draft 记录的上游身份，即使期间出现更高正式版，也先完成此前已检查的批次，下一轮再同步新版本；上游 tag 身份改变或 main 已变仍停止。完整重跑可刷新过期候选 Artifact，绝不覆盖已发布 Release 资产。旧 run 不能回退新更新指针，恢复仍使用原始已发布清单和归档。若 main 已变化而 draft 固定旧源码，停止并报告，不绕过源码门禁或静默改占用版本。
+
+上游暂存最长等待约 75 分钟，安装包各 job 保留原 timeout；超时不是完成。控制器必须读取最终 run、Release、实际 tag SHA、双平台资产和更新清单，再报告发布成功。GitHub Actions 日志/摘要是机器失败信号，不代表聊天通知已发送；通知由统一控制器在确认结果后发出。
+
+main 上仍保留显式手动发布入口：取消默认开启的 `validate_only`，也必须通过同源码完整 CI。候选分支保留 `validate_only` 时只上传 Artifact，绝不改变安装中的版本或更新指针。一次性请求分支不可改指向或强推复用；保留它们便于追踪原运行，不自动清理用户分支。
 
 ## 使用前
 

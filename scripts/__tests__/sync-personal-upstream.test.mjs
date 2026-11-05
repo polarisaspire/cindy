@@ -106,27 +106,25 @@ test('release identity resolves the tag commit, not a moving target_commitish', 
   assert.throws(() => releaseIdentity({ ...f.state.upstream[0], prerelease: true }, f.runtime), /stable/);
 });
 
-test('already shipped upstream release creates no merge, CI, build or release', async () => {
+test('already shipped upstream release creates no merge, CI, package or release', async () => {
   const f = fixture({ pending: false });
   await syncStableReleases(f.runtime);
   assert.equal(f.state.runs.length, 0);
   assert.ok(!f.state.calls.some(call => call[0] === 'git' && ['merge', 'push'].includes(call[1])));
 });
 
-test('a stable release preserves fork history and publishes only after exact-source CI', async () => {
+test('staging preserves fork history and runs exact-source CI but never publishes', async () => {
   const f = fixture();
   await syncStableReleases(f.runtime);
   assert.deepEqual(f.state.parents.get(merged), [head, target]);
-  assert.equal(f.state.latest.tag_name, 'v1.0.13');
-  const dispatches = f.state.calls.filter(call => call[0] === 'api' && call[1].endsWith('/dispatches'));
-  assert.match(dispatches[0][1], /ci.yml/);
-  assert.equal(dispatches[1][2].fields['inputs[expected_sha]'], merged);
-  assert.equal(dispatches[1][2].fields['inputs[validate_only]'], 'false');
-  assert.equal(f.state.runs[1].head_sha, merged);
+  assert.equal(f.state.latest.tag_name, 'v1.0.12');
+  assert.equal(f.state.runs.length, 1);
+  assert.equal(f.state.runs[0].path, '.github/workflows/ci.yml');
+  assert.equal(f.state.runs[0].head_sha, merged);
 });
 
 for (const [options, error] of [[{ conflict: true }, /Conflicts: overlap.ts/], [{ workflows: true }, /PERSONAL_SYNC_TOKEN/], [{ ciFailure: true }, /Workflow failed/]]) {
-  test(`failed synchronization does not publish: ${JSON.stringify(options)}`, async () => {
+  test(`failed staging cannot publish: ${JSON.stringify(options)}`, async () => {
     const f = fixture(options);
     await assert.rejects(syncStableReleases(f.runtime), error);
     assert.equal(f.state.latest.tag_name, 'v1.0.12');
@@ -138,38 +136,53 @@ for (const [options, error] of [[{ conflict: true }, /Conflicts: overlap.ts/], [
 test('configured workflow token permits ordinary merge but never force-push', async () => {
   const f = fixture({ workflows: true });
   await syncStableReleases(f.runtime, { hasSyncToken: true });
-  assert.equal(f.state.latest.tag_name, 'v1.0.13');
   assert.deepEqual(f.state.calls.find(call => call[0] === 'git' && call[1] === 'push'), ['git', 'push', 'origin', 'HEAD:refs/heads/main']);
+  assert.equal(f.state.latest.tag_name, 'v1.0.12');
 });
 
-test('an uncertain package dispatch is rediscovered instead of dispatched twice', async () => {
-  const f = fixture({ uncertain: true });
-  await assert.rejects(syncStableReleases(f.runtime), /response lost/);
-  assert.equal(f.state.runs.filter(item => item.path.endsWith('personal-desktop.yml')).length, 1);
+test('a transient existing CI failure retries the original attempt once', async () => {
+  const f = fixture(); f.state.parents.set(merged, [head, target]); f.state.head = f.state.remote = merged;
+  f.state.addCI(merged, 'failure');
   await syncStableReleases(f.runtime);
-  assert.equal(f.state.runs.filter(item => item.path.endsWith('personal-desktop.yml')).length, 1);
-  assert.equal(f.state.latest.tag_name, 'v1.0.13');
+  assert.equal(f.state.runs[0].run_attempt, 2);
+  assert.equal(f.state.latest.tag_name, 'v1.0.12');
 });
 
-test('a draft resumes its original run and source instead of allocating another version', async () => {
-  const f = fixture();
-  f.state.parents.set(merged, [head, target]); f.state.head = f.state.remote = merged; f.state.addCI();
-  const failed = f.run('personal-desktop.yml', merged, `Stable v0.1.126 @ ${merged}`, 'failure');
-  f.state.runs.push(failed);
-  f.state.catalog.push(release(merged, '1.0.13', { draft: true,
-    body: `<!-- cindy-personal-release ${JSON.stringify({ runId: String(failed.id), sourceCommit: merged })} -->` }));
-  await syncStableReleases(f.runtime);
-  assert.equal(failed.run_attempt, 2);
-  assert.equal(f.state.runs.filter(item => item.path.endsWith('personal-desktop.yml')).length, 1);
-});
-
-test('every intervening formal release is handled oldest-first', async () => {
+test('multiple new formal tags are staged oldest-first before one final CI', async () => {
   const f = fixture(); f.state.upstream.unshift(stable('v0.1.127', later, 127));
   await syncStableReleases(f.runtime);
-  assert.deepEqual(f.state.runs.filter(item => item.path.endsWith('personal-desktop.yml')).map(item => item.display_title.split(' ')[1]), ['v0.1.126', 'v0.1.127']);
+  assert.deepEqual(f.state.calls.filter(call => call[0] === 'git' && call[1] === 'merge').map(call => call.at(-1)), [target, later]);
+  assert.equal(f.state.runs.length, 1);
+  assert.equal(f.state.runs[0].head_sha, f.state.head);
+  assert.equal(f.state.latest.tag_name, 'v1.0.12');
 });
 
-test('CI success for another commit cannot authorize this package', () => {
+test('read-only inspection reports pending releases without mutation or dispatch', async () => {
+  const f = fixture();
+  await syncStableReleases(f.runtime, { readOnly: true });
+  assert.equal(f.state.runs.length, 0);
+  assert.equal(f.state.remote, head);
+  assert.ok(!f.state.calls.some(call => call[0] === 'git' && ['merge', 'push', 'config'].includes(call[1])));
+});
+
+test('an unfinished draft blocks main advancement and is never auto-published by staging', async () => {
+  const f = fixture(); f.state.catalog.push(release(head, '1.0.13', { draft: true }));
+  await assert.rejects(syncStableReleases(f.runtime), /unfinished release/);
+  assert.equal(f.state.remote, head);
+  assert.equal(f.state.runs.length, 0);
+});
+
+test('staging request is tied to current main and an existing formal tag', async () => {
+  const f = fixture();
+  await assert.rejects(syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.126/${later}`, sourceSha: later }), /not in main/);
+  await assert.rejects(syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.999/${head}`, sourceSha: head }), /not stable/);
+  await syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.126/${head}`, sourceSha: head });
+  assert.equal(f.state.remote, merged);
+  await syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.126/${head}`, sourceSha: head });
+  assert.equal(f.state.runs.length, 1, 'retry after staging reuses CI without a second merge or publication');
+});
+
+test('CI success for another commit or an older successful attempt cannot authorize publication', () => {
   const f = fixture(); f.state.addCI(old);
   assert.throws(() => publicationGate({ sourceSha: head }, f.runtime), /Exact-source/);
   f.state.addCI(head);
@@ -178,16 +191,31 @@ test('CI success for another commit cannot authorize this package', () => {
   assert.throws(() => publicationGate({ sourceSha: head }, f.runtime), /Exact-source/);
 });
 
-test('serialized package gate suppresses duplicate upstream releases and rejects SHA races', () => {
+test('release requests must name the exact source and remain current on main', () => {
   const f = fixture({ pending: false }); f.state.addCI();
-  assert.equal(publicationGate({ sourceSha: head, expectedSha: head, upstreamTag: 'v0.1.125' }, f.runtime).proceed, false);
-  assert.throws(() => publicationGate({ sourceSha: head, expectedSha: merged, upstreamTag: 'v0.1.125' }, f.runtime), /main moved/);
+  assert.throws(() => publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${old}` }, f.runtime), /exact source/);
+  f.state.remote = later;
+  assert.throws(() => publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${head}` }, f.runtime), /main changed after review/);
+});
+
+test('reviewed personal changes can publish on an already-shipped upstream baseline', () => {
+  const f = fixture({ pending: false }); f.state.addCI();
+  f.state.latest = release(old); f.state.tags.set('v1.0.12', old);
+  const result = publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${head}` }, f.runtime);
+  assert.equal(result.proceed, true);
+  assert.equal(result.upstream.tag, 'v0.1.125');
+});
+
+test('replaying a release request for an already-published source is a no-op', () => {
+  const f = fixture({ pending: false }); f.state.addCI();
+  assert.equal(publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${head}` }, f.runtime).proceed, false);
+  assert.throws(() => publicationGate({ sourceSha: head, expectedSha: merged }, f.runtime), /main moved/);
   assert.equal(publicationGate({ sourceSha: head, validateOnly: true }, f.runtime).proceed, true);
 });
 
-test('a completed package run without a complete published release is not success', async () => {
-  const f = fixture({ noPublish: true });
-  await assert.rejects(syncStableReleases(f.runtime), /without a published release/);
+test('a new official release after review blocks publication until it is integrated', () => {
+  const f = fixture(); f.state.addCI(); f.state.latest = release(old); f.state.tags.set('v1.0.12', old);
+  assert.throws(() => publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${head}` }, f.runtime), /does not contain/);
 });
 
 test('previously recorded upstream identity cannot silently change', async () => {
@@ -197,9 +225,14 @@ test('previously recorded upstream identity cannot silently change', async () =>
   assert.equal(f.state.runs.length, 0);
 });
 
-test('main advancing during workflow dispatch stops without accepting a different source', async () => {
+test('an incomplete published release cannot become a synchronization baseline', async () => {
+  const f = fixture({ pending: false }); f.state.latest.assets = [];
+  await assert.rejects(syncStableReleases(f.runtime), /Published release missing/);
+  assert.equal(f.state.runs.length, 0);
+});
+
+test('main advancing during CI dispatch stops without accepting a different source', async () => {
   const f = fixture({ dispatchRace: true });
-  // Reach dispatch rather than the remote confirmation immediately after merge.
   const api = f.runtime.api; let confirmed = false;
   f.runtime.api = (endpoint, options) => {
     if (endpoint === `${repo}/git/ref/heads/main` && !confirmed) { confirmed = true; return { object: { sha: f.state.head } }; }
@@ -210,20 +243,14 @@ test('main advancing during workflow dispatch stops without accepting a differen
 });
 
 
-test('a transient existing CI failure retries the original attempt once', async () => {
-  const f = fixture(); f.state.parents.set(merged, [head, target]); f.state.head = f.state.remote = merged;
-  f.state.addCI(merged, 'failure');
-  await syncStableReleases(f.runtime);
-  assert.equal(f.state.runs[0].run_attempt, 2);
-  assert.equal(f.state.latest.tag_name, 'v1.0.13');
-});
-
-
-test('read-only CI inspection reports a pending release without mutation or dispatch', async () => {
-  const f = fixture();
-  await syncStableReleases(f.runtime, { readOnly: true });
-  assert.equal(f.state.runs.length, 0);
-  assert.equal(f.state.remote, head);
-  assert.ok(!f.state.calls.some(call => call[0] === 'git' && ['merge', 'push', 'config'].includes(call[1])));
-  assert.ok(f.state.calls.some(call => call[0] === 'report' && call[1].includes('Pending official releases')));
+test('same-run draft recovery keeps its reviewed upstream when a newer release appears', () => {
+  const f = fixture(); f.state.addCI(); f.state.latest = release(old); f.state.tags.set('v1.0.12', old);
+  f.state.catalog.push(release(head, '1.0.13', { draft: true, body:
+    `<!-- cindy-personal-release ${JSON.stringify({ runId: '7', sourceCommit: head })} -->\n`
+    + `<!-- cindy-upstream-release ${JSON.stringify({ releaseId: 125, tag: 'v0.1.125', commitSha: old })} -->` }));
+  const options = { sourceSha: head, requestRef: `automation/personal-release/${head}`, runId: '7' };
+  assert.equal(publicationGate(options, f.runtime).upstream.tag, 'v0.1.125');
+  assert.throws(() => publicationGate({ ...options, runId: '8' }, f.runtime), /another run or source/);
+  f.state.upstream.find(item => item.tag_name === 'v0.1.125').sha = later;
+  assert.throws(() => publicationGate(options, f.runtime), /Draft upstream release identity changed/);
 });
