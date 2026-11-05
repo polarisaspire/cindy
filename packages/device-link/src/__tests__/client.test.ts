@@ -9271,6 +9271,70 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     }, { pingIntervalMs: 600_000, transportRetryIntervalMs: 2_000 });
   });
 
+  // Unit: production sendInvokeResult, fake socket/clock. The 16-slot send
+  // window can block a reply before the 64-entry admission cleanup runs.
+  // Existing tests only cover a completely full queue or live-result prefixes.
+  it.each(['maker:event', 'local-db:messages:created', 'live'])(
+    'only advances a mirror prefix to admit a result through a full receive window (%s)', async (head) => {
+      await withFakeTimers(async (h, advance) => {
+        const ws = h.current();
+        const linked = establishInboundReliableLink(h, 'healthy-stream', 1, 'healthy');
+        await advance(1);
+        await linked;
+        h.client.sendPush('healthy', 'maker:event', { keep: true });
+        if (head === 'live') h.client.sendInvokeResult('dev-b', 'live-head', { ok: true, result: null });
+        else h.client.sendPush('dev-b', head, { keepUnlessMirror: true });
+        for (let i = 1; i < MAX_TRANSPORT_REASSEMBLIES; i++) {
+          h.client.sendPush('dev-b', 'maker:event', { i });
+        }
+        h.client.sendInvokeResult('dev-b', 'window-result', { ok: true, result: 'ready' });
+        const reply = ws.sent.find(e => e.id === 'window-result');
+        if (head === 'maker:event') {
+          expect(reply).toBeDefined();
+          expect(parseTransportPayload(reply!.payload)!.meta).toMatchObject({
+            seq: MAX_TRANSPORT_REASSEMBLIES + 1, baseSeq: 2,
+          });
+          expect(h.client.getReliableSendQueueDepth('dev-b')).toBe(MAX_TRANSPORT_REASSEMBLIES);
+        } else {
+          expect(reply).toBeUndefined();
+          expect(h.client.getReliableSendQueueDepth('dev-b')).toBe(MAX_TRANSPORT_REASSEMBLIES + 1);
+        }
+        expect(h.client.getReliableSendQueueDepth('healthy')).toBe(1);
+        expect(h.client.isLinkReady('healthy')).toBe(true);
+        expect(ws.closed).toBeNull();
+      }, { pingIntervalMs: 600_000, transportRetryIntervalMs: 2_000 });
+    },
+  );
+
+  it('preflights the socket before evicting a mirror to admit a window-blocked result', async () => {
+    await withFakeTimers(async (h) => {
+      const ws = h.current();
+      for (let i = 0; i < MAX_TRANSPORT_REASSEMBLIES; i++) h.client.sendPush('dev-b', 'maker:event', { i });
+      ws.bufferedAmount = MAX_TRANSPORT_WEBSOCKET_BUFFERED_BYTES;
+      expect(() => h.client.sendInvokeResult('dev-b', 'blocked-result', { ok: true, result: null }))
+        .toThrow(expect.objectContaining({ code: 'BACKPRESSURE' }));
+      expect(h.client.getReliableSendQueueDepth('dev-b')).toBe(MAX_TRANSPORT_REASSEMBLIES);
+      ws.bufferedAmount = 0;
+      h.client.sendInvokeResult('dev-b', 'retry-result', { ok: true, result: null });
+      const reply = ws.sent.find(e => e.id === 'retry-result')!;
+      expect(parseTransportPayload(reply.payload)!.meta).toMatchObject({
+        seq: MAX_TRANSPORT_REASSEMBLIES + 1, baseSeq: 2,
+      });
+    }, { pingIntervalMs: 600_000, transportRetryIntervalMs: 2_000 });
+  });
+
+  it('keeps the entire mirror prefix when a live barrier prevents freeing enough receive slots', async () => {
+    await withFakeTimers(async (h) => {
+      const ws = h.current();
+      h.client.sendPush('dev-b', 'maker:event', { first: true });
+      h.client.sendInvokeResult('dev-b', 'live-barrier', { ok: true, result: null });
+      for (let i = 0; i < MAX_TRANSPORT_REASSEMBLIES; i++) h.client.sendPush('dev-b', 'maker:event', { i });
+      h.client.sendInvokeResult('dev-b', 'behind-barrier', { ok: true, result: null });
+      expect(ws.sent.some(e => e.id === 'behind-barrier')).toBe(false);
+      expect(h.client.getReliableSendQueueDepth('dev-b')).toBe(MAX_TRANSPORT_REASSEMBLIES + 3);
+    }, { pingIntervalMs: 600_000, transportRetryIntervalMs: 2_000 });
+  });
+
   it('a full receive window queues locally even with a full socket and does not block another peer', async () => {
     await withFakeTimers(async (h, advance) => {
       const ws = h.current();

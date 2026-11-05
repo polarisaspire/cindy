@@ -3595,18 +3595,24 @@ export class DeviceLinkClient {
     // 真会发送时仍在驱逐/腾位之前预检(旧 P1:先驱逐再拒会清空镜像历史)。
     const additionalFrames = Math.max(1, frames.length);
     const previousBaseSeq = this.getTransportBaseSeq(peer);
+    const resultWindowBaseSeq = routedEnv.kind === 'invoke-result' && hasPendingCapacity()
+      ? this.resultAdmissionBaseSeq(peer, seq) : previousBaseSeq;
     // 走直连的帧不占 relay 的拥塞预算与 socket 缓冲。
     const viaDirect = this.directChannelForSend(env.dst, peer) !== null;
     const willSendNow = this.isPeerSendReady(peer)
       // Admission may evict a discardable prefix and move this message into
       // the window. Preserve the socket preflight before that mutation.
-      && (!this.isOutsideReceiveWindow(peer, seq) || !hasPendingCapacity())
+      && (!this.isOutsideReceiveWindow(peer, seq) || !hasPendingCapacity()
+        || resultWindowBaseSeq > previousBaseSeq)
       && !this.shouldHoldRecoverySend(peer, additionalFrames)
       && (viaDirect || this.congestionCloseStreak === 0 || this.congestionSendBudget.canTake(
         env.dst, additionalFrames, this.getReadyReliablePeers(env.dst), this.monotonicNow(),
       ));
     if (willSendNow && !viaDirect) {
       this.assertWebSocketCapacity(this.measureReliableFrames(frames));
+    }
+    if (resultWindowBaseSeq > previousBaseSeq) {
+      this.dropOldestCoalescibleForAdmission(env.dst, peer, reservedBytes, resultWindowBaseSeq);
     }
     if (!hasPendingCapacity()) {
       if (routedEnv.kind === 'invoke-result') {
@@ -3622,7 +3628,7 @@ export class DeviceLinkClient {
         // 的可合并镜像帧直到放得下（剩余镜像历史保留，对端恢复后仍可交付最新
         // 状态）；队头是 live 帧或白名单外 push 时无位可让，维持原 BACKPRESSURE
         // 语义。只删队头 → baseSeq 单调前移，无 seq 空洞。
-        this.dropOldestDiscardableForPushAdmission(env.dst, peer, reservedBytes);
+        this.dropOldestCoalescibleForAdmission(env.dst, peer, reservedBytes);
       } else {
         // live invoke 与白名单外 push（不可合并事件流/流控数据，见
         // COALESCIBLE_PUSH_CHANNELS 注释）的入队压力只做 TTL 兜底清扫：过期
@@ -4043,6 +4049,20 @@ export class DeviceLinkClient {
     // for its entire byte-paced retry interval. Prefix eviction advances this
     // same base, so skipped/discardable messages cannot strand the window.
     return seq - this.getTransportBaseSeq(peer) >= MAX_TRANSPORT_REASSEMBLIES;
+  }
+
+  /** Plan before socket preflight: a reply may hit the 16-slot send window
+   * long before the 64-entry pending buffer is full. Only coalescible mirrors
+   * and skips may yield here; live requests and non-coalescible events remain
+   * FIFO barriers. Do not evict anything unless the reply will fit afterward. */
+  private resultAdmissionBaseSeq(peer: PeerTransportState, seq: number): number {
+    const base = this.getTransportBaseSeq(peer);
+    for (const pending of peer.pending.values()) {
+      if (seq - pending.seq < MAX_TRANSPORT_REASSEMBLIES) return pending.seq;
+      if (!isTransportSkipPayload(pending.envelope.payload)
+        && !isCoalesciblePushEnvelope(pending.envelope)) return base;
+    }
+    return seq;
   }
 
   private getReadyReliablePeers(target: string): string[] {
@@ -5029,7 +5049,7 @@ export class DeviceLinkClient {
   /**
    * 可丢弃帧判据（重连重放与 invoke-result 腾位两条路径共用的不变量;
    * push latest-wins 腾位用更窄的白名单判据,见
-   * dropOldestDiscardableForPushAdmission）：
+   * dropOldestCoalescibleForAdmission）：
    * best-effort push，以及 timeout / relay-error 后被 dropReliablePendingForRequest
    * 换成 transport-skip 占位 payload 的帧——其外层 kind 仍是原 invoke /
    * invoke-result，但已无任何业务副作用。两者都可以通过推进 baseSeq 让接收端
@@ -5117,8 +5137,8 @@ export class DeviceLinkClient {
   }
 
   /**
-   * push 入队的拥塞腾位（latest-wins）：只从队头连续移除最旧的可驱逐帧，直到
-   * 放得下新帧或队头变成不可驱逐帧。与 dropDiscardablePendingPrefix 的区别是「按需
+   * 镜像 push 入队或结果回包进入发送窗口时的拥塞腾位（latest-wins）：只从队头连续
+   * 移除最旧的可驱逐帧，直到容量／窗口足够或队头变成不可驱逐帧。与 dropDiscardablePendingPrefix 的区别是「按需
    * 腾位」而非「整段前缀丢弃」：对端只是暂时未 ACK 时，队列里较新的镜像历史保留
    * 下来，恢复后仍能交付；被驱逐的最旧镜像由控制端 resync 补偿，不是静默丢数据。
    *
@@ -5137,15 +5157,17 @@ export class DeviceLinkClient {
    * 告警按 peer 聚合（PUSH_ADMISSION_DROP_LOG_INTERVAL_MS 窗口）：洪峰期驱逐
    * 逐条 warn 会把 5168 次背压风暴换成 5168 行日志风暴（review P2）。
    */
-  private dropOldestDiscardableForPushAdmission(
+  private dropOldestCoalescibleForAdmission(
     dst: string,
     peer: PeerTransportState,
     reservedBytes: number,
+    resultWindowBaseSeq = 0,
   ): number {
     let dropped = 0;
     while (
       peer.pending.size >= MAX_TRANSPORT_PENDING_MESSAGES
       || peer.pendingBytes + reservedBytes > MAX_TRANSPORT_PENDING_BYTES
+      || this.getTransportBaseSeq(peer) < resultWindowBaseSeq
     ) {
       const head = peer.pending.entries().next();
       if (head.done) break;
@@ -5167,7 +5189,7 @@ export class DeviceLinkClient {
         || now - peer.pushAdmissionDropLogAt >= PUSH_ADMISSION_DROP_LOG_INTERVAL_MS
       ) {
         this.log.warn(
-          `dropped ${peer.pushAdmissionDropCount} oldest discardable pending frame(s) for peer ${dst.slice(0, 8)} latest-wins push admission (aggregated since last report)`,
+          `dropped ${peer.pushAdmissionDropCount} oldest discardable pending frame(s) for peer ${dst.slice(0, 8)} latest-wins ${resultWindowBaseSeq > 0 ? 'invoke-result' : 'push'} admission (aggregated since last report)`,
         );
         peer.pushAdmissionDropCount = 0;
         peer.pushAdmissionDropLogAt = now;
