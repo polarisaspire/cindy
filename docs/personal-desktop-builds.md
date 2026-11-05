@@ -4,10 +4,10 @@
 
 ## 分支与首次启用
 
-1. 将已审阅的自用修改通过 PR 合入自己 fork 的 `main`，只自动触发 `client-ci` 测试，不打包或发布客户端。
+1. 将已审阅的自用修改通过 PR 合入自己 fork 的 `main`，自动触发 `client-ci` 测试；普通个人改动不因此发布客户端。上游正式版及维护者自己的 PR 由下面的统一维护流程处理，普通 main push 不直接发布。
 2. 在自己的 fork 打开 Actions，若尚未启用 Actions，先启用。
-3. 将 `.github/workflows/personal-desktop.yml` 与 `.github/workflows/sync-personal-upstream.yml` 通过 PR 放入自己 fork 的默认分支，注册手动与定时入口。直连修复、自用更新源码、发布脚本和工作流统一放在自己的 `main`；日常构建和发布不再依赖历史修复分支。手动运行时选择 `main`。
-4. 只有维护者明确要求发布时，手动运行 **Personal desktop packages**，选择 `main` 并取消勾选默认开启的 `validate_only`。等两平台打包及 Debian 12 安装验证成功后，才会发布。只想验证安装包时保留勾选，完成后在该次运行的 Artifacts 下载候选包。
+3. 将 `.github/workflows/personal-desktop.yml` 与 `.github/workflows/sync-personal-upstream.yml` 通过 PR 放入自己 fork 的默认分支，注册手动与受控请求入口。直连修复、自用更新源码、发布脚本和工作流统一放在自己的 `main`；日常构建和发布不再依赖历史修复分支。手动运行时选择 `main`。
+4. 维护者已授权每日同步上游正式 Release，检查并合入自己提交到本 fork main 的非 draft PR，完成后发布 Windows / Linux 自用构建。需要额外手动发布个人改动时，手动运行 **Personal desktop packages**，选择 `main` 并取消勾选默认开启的 `validate_only`。等两平台打包及 Debian 12 安装验证成功后，才会发布。只想验证安装包时保留勾选，完成后在该次运行的 Artifacts 下载候选包。
 
 构建矩阵为 Windows x64 `Setup.exe` 和 Linux x64 `.deb`；目前固定 `global`。bp-holder 安装前先核对 `uname -m` 与系统发行版，arm64 不能安装 x64 包。
 
@@ -17,7 +17,7 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 产物目录为 `apps/desktop/release/artifacts/global/<version>/<platform>-x64/`，包括 `build-info.json`、`SOURCE.txt`、`SHA256SUMS.txt`。`SOURCE.txt` 记录源码 SHA 和该次 Actions 链接。Artifact 保留 14 天。
 
-构建 job 只有仓库读取权限。显式手动发布且两平台的测试、类型检查与 packaged smoke 都成功后，独立发布 job 才获得本 fork 的 `contents: write`，创建 `v<version>` Release。先上传并验证全部资产、完成旧版兼容入口，再发布为非 prerelease 并设为 Latest；不上传官方更新源。安装包未签名，不需要官方签名凭证。实际分发状态以 GitHub run 与 Release 为准，不能把本地测试通过当成已发布。
+构建 job 只有读取权限。正式发布先核验同一源码 SHA 的完整 `client-ci` 成功，再等两平台的测试、类型检查、packaged smoke 和 Debian 12 安装检查全部成功；独立发布 job 才获得本 fork 的 `contents: write`，创建 `v<version>` Release。先上传并验证全部资产、完成旧版兼容入口，再发布为非 prerelease 并设为 Latest；不上传官方更新源。安装包未签名，不需要官方签名凭证。实际分发状态以 GitHub run 与 Release 为准，不能把本地测试通过当成已发布。
 
 新版通过 GitHub `releases/latest/download/manifest-<platformKey>.json` 检查更新，下载指向对应的 `v1.0.x` 标签。Release 正文和应用内 `release-notes.json` 使用同一份中文说明；`release-notes-index.json` 包含已发布的版本日志索引。应用内日志只读自己 fork 的版本资产，不再向官方 CDN 请求自用版本号。
 
@@ -27,15 +27,39 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 ## 后续自动同步与发布
 
-默认分支上的 **Sync personal Cindy from upstream** 每日北京时间 04:23（GitHub 可能延迟）及手动触发时，将官方 main 合入自己的 main。按 fork 维护者选定的自动同步方式，对自用 main 执行带 DCO 的普通 merge 和 push，不强推；发生冲突则不推送。同步后只运行 `client-ci` 测试，不触发安装包工作流；没有新源码且该提交已有成功或进行中的测试时不重复执行。人工修改仍通过 PR 合入 main。上游同步、修复和 PR 合并均不代表维护者要求发布新版。
+每日维护由一个控制器统一执行。仓库不再保留独立 cron，也不在普通 main push 时发布，避免上游刚合入、个人 PR 尚未审完就提前出包。`client-ci` 仍按既有 main push / PR 入口运行。
 
-上游经常修改 `.github/workflows/`；GitHub 默认 job token 无权推送这类文件。要完整启用无人值守同步，在 fork 的 **Settings → Secrets and variables → Actions** 添加 `PERSONAL_SYNC_TOKEN`，使用仅授权 `polarisaspire/cindy` 的 fine-grained PAT，授予 **Contents、Workflows: Read and write**。值由用户在 GitHub 直接填写，不写进代码、聊天、安装包或更新清单。PAT 仅供 checkout/push；构建 dispatch 和发布仍使用 job token。未配置时普通代码更新可同步，涉及 workflow 则在 push 前停止并提示，不静默丢弃上游文件。
+### 第一阶段：同步正式版，只验证不发布
 
-定时与手动 dispatch 入口要求文件位于默认分支；部署到 main 后，自动同步、手动触发和应用安装包均以 main 为准。历史修复分支不再触发新构建，避免维护两套发布来源。
+控制器查询官方 `makecindy/cindy` 的非 draft、非 prerelease 正式 `v主.次.补丁` Release。需要同步时，将当前 main 的完整 SHA 记为 `<base>`，在本 fork 创建一次性分支 `automation/upstream-sync/<上游tag>/<base>`，目标必须为 `<base>`。已存在同名请求时读取原 Actions run，不重复创建或强推。GitHub 的 `create` 事件捕获这个显式分支创建请求并触发 **Sync personal Cindy from upstream**，也可在 main 手动 dispatch 此暂存工作流。
 
-合并前需要安装包验证时，可手动选择候选分支并保留默认勾选的 `validate_only`，只构建和上传 Artifact，始终跳过 Release 发布。明确正式发布时才在 main 取消勾选。更新清单只由 main 的显式手动发布更新，验证其他分支不会改变安装中的版本或更新指针。
+工作流通过实际 tag 提交（支持 annotated tag）解析来源并核对 fetch 后的 SHA，不使用 target_commitish 或官方 main 开发快照。请求源码必须仍在 main 历史中，正常重跑可保留此前已经合入的结果。新正式版本按顺序以带 DCO 的普通 merge 合入 main，不 reset、不强推、不丢弃 fork 修改；冲突 abort，不推送失败结果。既有未完成 Release draft 会阻止 main 继续前进，先由控制器处理恢复或报告决定点。
 
-Release 使用单调递增的 `1.0.<patch>` 版本，按已发布的正式版本计算下一号，patch 最大 65535，不再使用 Actions 的运行次数。保留已发布的 1.0.11，下一次正常正式版为 1.0.12；验证、失败和取消的构建不占号。工作流从版本选择到发布全程串行，防止两次手动发布选到同一版本。正式 Release 正文保存隐藏的 run/source 标记，同一次工作流重跑沿用原版本（包括上传中断留下的 draft）；另一次任务遇到已占用的待发版本时停止，先重跑原任务恢复，不能静默覆盖。旧 run 重跑不会覆盖更新指针；同一 run 已发布后保留原资产与摘要，允许恢复只上传了一部分或缺失的清单。分发清单含仓库、平台、源码 SHA、大小与 SHA256；任一构建身份或摘要不一致即停止。
+暂存只等待最终源码的完整 `client-ci`，**任何路径都不会请求安装包或发布 Release**。无新正式版时直接结束。旧版已发布源码作为祖先基线，避免重复处理已包含版本；CI 同时使用只读 `inspect` 入口核验真实 Release/tag 关系。实现与测试见 `scripts/sync-personal-upstream.mjs`、`scripts/__tests__/sync-personal-upstream.test.mjs`。
+
+上游修改 `.github/workflows/` 时沿用 `PERSONAL_SYNC_TOKEN`，仅授权本 fork 的 **Contents、Workflows: Read and write**。用户在 GitHub 填写凭证，不写进源码或产物。PAT 仅供 checkout/push，CI 与发布仍用 job token；未配置且出现 workflow 改动则在 push 前停止。
+
+### 第二阶段：检查维护者自己的 fork PR
+
+控制器只处理作者为本 fork 维护者、目标为 `polarisaspire/cindy:main` 的 PR，不操作提交到官方仓库的 PR。逐个阅读最终 diff、讨论和审核结果，核对相关规则与 CI；draft、冲突、未解决的反对意见、必须等待的审批或不安全改动不自动合入。检查通过后使用预期 head SHA 合并，若 head/base 改变则重新检查。代码检查不等于替维护者提交 GitHub APPROVE 审核；需要明确审批时报告给维护者。
+
+上游与所有本轮可合入 PR 处理结束后，读取最终 main SHA 并等待该 SHA 的完整 `client-ci` 成功。仍有阻塞项时说明原因与处理结果；未经本轮检查的后续源码不能混入发版。安装包构建只验证待发布源码，不替代代码审查或 PR 合并判断。
+
+### 第三阶段：明确请求最终源码发布
+
+仅在第二阶段结束后，控制器在本 fork 创建 `automation/personal-release/<完整final-SHA>` 分支，目标必须正是当前 main 的 `<final-SHA>`。这是一次性、绑定源码的“本轮检查完成”信号，不是普通 main push。无实际待发布客户端变更、仅部署本维护配置时不创建请求，也不为已包含的上游版本重复发版。
+
+该分支的 `create` 事件触发 **Personal desktop packages**，不是后续 push。只接受 branch 类型及对应请求前缀，其他分支或 tag 的创建不会运行构建，也不共享受控发布的并发组。plan job 验证分支名中的 SHA、事件源码、当前 main、完整 `client-ci` 以及最新官方正式版的祖先关系；同一源码已发布则直接跳过。个人 PR 即使基于已经发布过的上游版本，也可按新的最终源码发版。plan、构建和发布均显式 checkout 固定事件 SHA；Artifact、build-info、SOURCE、清单及标签统一使用它。发布前再次核对 main 与 CI；main 变化或检查失败就停止，控制器必须重新检查最终源码，再提交新的请求。
+
+工作流只构建 Windows x64 和 Linux x64，保留全部测试、packaged smoke、干净 Debian 12 安装、SHA256 与双平台一致性门禁。两平台全部通过后才更新 fork Release 与既有兼容清单，不自动安装或重启客户端。
+
+### 并发、恢复与结果确认
+
+安装包工作流仍全程串行，版本按已发布正式版单调递增 `1.0.<patch>`（上限 65535）；失败和验证不占号。请求分支以源码 SHA 命名，重复请求读取同一个 run。构建或上传中断时，先核对原 run/source 与 draft，再重跑原 run，保持版本号。已创建 draft 的同 run、同源码恢复使用 draft 记录的上游身份，即使期间出现更高正式版，也先完成此前已检查的批次，下一轮再同步新版本；上游 tag 身份改变或 main 已变仍停止。完整重跑可刷新过期候选 Artifact，绝不覆盖已发布 Release 资产。旧 run 不能回退新更新指针，恢复仍使用原始已发布清单和归档。若 main 已变化而 draft 固定旧源码，停止并报告，不绕过源码门禁或静默改占用版本。
+
+上游暂存最长等待约 75 分钟，安装包各 job 保留原 timeout；超时不是完成。控制器必须读取最终 run、Release、实际 tag SHA、双平台资产和更新清单，再报告发布成功。GitHub Actions 日志/摘要是机器失败信号，不代表聊天通知已发送；通知由统一控制器在确认结果后发出。
+
+main 上仍保留显式手动发布入口：取消默认开启的 `validate_only`，也必须通过同源码完整 CI。候选分支保留 `validate_only` 时只上传 Artifact，绝不改变安装中的版本或更新指针。一次性请求分支不可改指向或强推复用；保留它们便于追踪原运行，不自动清理用户分支。
 
 ## 使用前
 
@@ -60,3 +84,4 @@ Windows 解压后可用 PowerShell `Get-FileHash -Algorithm SHA256 <安装包路
 本次修复还过滤收发 SDP 中的 `198.18.0.0/15` 候选（含 IPv4-mapped IPv6 和关联地址），保留正常 LAN、VPN、mDNS 与 IPv6 候选。支持 `getSelectedCandidatePair()` 的浏览器在通道接管业务、路径变化和收发时检查实际地址对，发现该网段即关闭直连并复用中转回退，避免仅过滤 SDP 后仍选中虚拟地址。
 
 较旧的 WebView 若缺少上述地址对 API，只执行 SDP 过滤和现有可靠层兜底。即使有该 API，浏览器仍可能把地址隐藏为空或 mDNS 名称，代码只能拒绝实际暴露出的虚拟地址，不能宣称所有隐藏地址已排除。建议 Windows 与 Linux 都更新。代码层排除规则不等同于已经证明现场故障的唯一根因；单测、浏览器 RTC smoke、自建中转互通与两台实机网络验收分别记录。
+

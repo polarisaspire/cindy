@@ -1,37 +1,63 @@
 name: Personal desktop packages
+run-name: ${{ github.event_name == 'create' && format('Reviewed main @ {0}', github.sha) || inputs.upstream_tag && !inputs.validate_only && format('Stable {0} @ {1}', inputs.upstream_tag, github.sha) || format('Personal desktop @ {0}', github.sha) }}
 
 on:
+  # Never main pushes or a schedule: this is an explicit review-complete request.
+  create:
   workflow_dispatch:
     inputs:
       validate_only:
         description: Build the selected branch without publishing an update
         type: boolean
         default: true
+      expected_sha:
+        description: Expected main source SHA; a changed main fails before building
+        type: string
+        default: ''
+      upstream_tag:
+        description: Official stable release tag for automatic synchronization
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # Serialize allocation as well as publication, across validation branches.
-  group: personal-desktop
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/personal-release/'))) && 'personal-desktop' || format('personal-desktop-ignore-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   plan:
     name: Select version from published releases
-    if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.validate_only)
+    if: github.repository == 'polarisaspire/cindy' && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.validate_only)) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/personal-release/')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      proceed: ${{ steps.gate.outputs.proceed }}
+      upstream_release: ${{ steps.gate.outputs.upstream_release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - name: Require exact-source CI and skip already published upstream releases
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          VALIDATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.validate_only }}
+          PUBLICATION_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
+        run: node scripts/sync-personal-upstream.mjs gate
       - name: Select next release or resume this run
+        if: steps.gate.outputs.proceed == 'true'
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,6 +66,7 @@ jobs:
   package:
     name: Package ${{ matrix.platform }} x64
     needs: plan
+    if: needs.plan.outputs.proceed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +100,7 @@ jobs:
       - name: Checkout source and LFS assets
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           lfs: true
           persist-credentials: false
@@ -140,7 +168,7 @@ jobs:
 
       - name: Verify fork updates and publication recovery
         run: |
-          node --test scripts/__tests__/personal-desktop-release.test.mjs
+          node --test scripts/__tests__/personal-desktop-release.test.mjs scripts/__tests__/sync-personal-upstream.test.mjs
           pnpm --filter desktop exec vitest run \
             src/main/__tests__/forkAppUpdateSource.test.ts \
             src/main/__tests__/releaseNotesService.test.ts \
@@ -180,6 +208,8 @@ jobs:
           path: apps/desktop/release/artifacts/global/${{ needs.plan.outputs.version }}/${{ matrix.platform }}-x64/
           if-no-files-found: error
           retention-days: 14
+          # A full rerun retains the source/run identity but refreshes expired artifacts.
+          overwrite: true
 
   linux-compatibility:
     name: Install final deb on clean Debian 12
@@ -189,6 +219,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
@@ -203,11 +234,12 @@ jobs:
   publish:
     name: Publish verified personal updates
     needs: [plan, package, linux-compatibility]
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/main' && !inputs.validate_only
+    if: github.repository == 'polarisaspire/cindy' && needs.plan.outputs.proceed == 'true' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.validate_only) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/personal-release/')))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
     env:
       PERSONAL_VERSION: ${{ needs.plan.outputs.version }}
     concurrency:
@@ -217,6 +249,7 @@ jobs:
       - name: Checkout publication tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Setup Node.js
@@ -230,7 +263,22 @@ jobs:
           path: personal-downloads
       - name: Verify complete release and generate app-only manifests
         run: node scripts/personal-desktop-release.mjs prepare personal-downloads personal-release
-      - name: Publish versioned release and preserve legacy updates
+      - name: Recheck exact-source CI and publication identity
+        id: final_gate
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          VALIDATE_ONLY: 'false'
+          PUBLICATION_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
+        run: node scripts/sync-personal-upstream.mjs gate
+      - name: Publish versioned release and preserve legacy updates
+        if: steps.final_gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PERSONAL_UPSTREAM_RELEASE: ${{ steps.final_gate.outputs.upstream_release }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          PUBLICATION_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
         run: node scripts/personal-desktop-release.mjs publish personal-release
+

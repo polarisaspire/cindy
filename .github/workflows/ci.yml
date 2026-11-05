@@ -66,7 +66,13 @@ jobs:
         run: pnpm test:runner
 
       - name: Verify personal release planning and publication recovery
-        run: node --test scripts/__tests__/personal-desktop-release.test.mjs
+        run: node --test scripts/__tests__/personal-desktop-release.test.mjs scripts/__tests__/sync-personal-upstream.test.mjs
+
+      - name: Inspect stable release tracking without publishing
+        if: github.repository == 'polarisaspire/cindy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/sync-personal-upstream.mjs inspect
 
       # Cross-file security, permission, and design contracts are intentionally
       # outside the ordinary behavior-test pool, but remain a required gate.
@@ -353,3 +359,4 @@ jobs:
 
       - name: Run Desktop Git integration tests
         run: pnpm test:git-integration
+
