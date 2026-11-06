@@ -6,7 +6,7 @@ import { repairDraft, correctedBody, TARGET as T, OLD_MARKER, NEW_MARKER } from 
 
 function fixture() {
   const root = `repos/${T.repository}`;
-  const draft = { id: T.releaseId, tag_name: 'v1.0.13', draft: true, prerelease: false,
+  const draft = { id: T.releaseId, name: 'v1.0.13', tag_name: 'v1.0.13', draft: true, prerelease: false,
     target_commitish: T.source, body: `Existing notes\n<!-- cindy-personal-release ${JSON.stringify({ runId: String(T.runId), sourceCommit: T.source })} -->\n${OLD_MARKER}`,
     assets: [{ id: 10, name: 'SOURCE.txt', size: 125 }] };
   const data = new Map([
@@ -36,10 +36,12 @@ function fixture() {
     if (options.method) {
       assert.equal(endpoint, `${root}/releases/${T.releaseId}`);
       assert.equal(options.method, 'PATCH');
-      assert.deepEqual(Object.keys(options.body), ['body']);
+      assert.deepEqual(Object.keys(options.body), ['body', 'tag_name']);
+      assert.equal(options.body.tag_name, 'v1.0.13');
       writes.push(options);
       if (state.failWrite) throw new Error('Rejected PATCH');
       draft.body = options.body.body;
+      draft.tag_name = options.body.tag_name;
       if (state.loseResponse) throw new Error('Lost response');
     } else if (endpoint === `${root}/releases/${T.releaseId}` && ++draftReads === 2 && state.concurrentEdit) {
       draft.body += '\nConcurrent user edit';
@@ -59,6 +61,13 @@ test('an already corrected draft is a verified no-op', async () => {
   assert.deepEqual(await repairDraft(f.api), { changed: false, verified: true });
   assert.equal(f.writes.length, 0);
 });
+test('restores only the observed internal draft placeholder after marker correction', async () => {
+  const f = fixture(); f.draft.body = correctedBody(f.draft);
+  f.draft.tag_name = 'untagged-b1623fe0e1ef2c864dec';
+  assert.deepEqual(await repairDraft(f.api), { changed: true, verified: true });
+  assert.equal(f.draft.tag_name, 'v1.0.13');
+  assert.equal(f.writes.length, 1);
+});
 test('lost PATCH response is verified without a second write', async () => {
   const f = fixture(); f.loseResponse = true;
   assert.equal((await repairDraft(f.api)).verified, true);
@@ -76,6 +85,9 @@ test('a concurrent body edit stops the mutation', async () => {
 });
 for (const [name, mutate] of [
   ['published draft', f => { f.draft.draft = false; }],
+  ['wrong draft title', f => { f.draft.name = 'v1.0.14'; }],
+  ['unexpected tag', f => { f.draft.tag_name = 'v1.0.14'; }],
+  ['placeholder without corrected marker', f => { f.draft.tag_name = 'untagged-b1623fe0e1ef2c864dec'; }],
   ['wrong source', f => { f.draft.target_commitish = '0'.repeat(40); }],
   ['wrong owner', f => { f.draft.body = f.draft.body.replace(String(T.runId), '123'); }],
   ['duplicate marker', f => { f.draft.body += OLD_MARKER; }],

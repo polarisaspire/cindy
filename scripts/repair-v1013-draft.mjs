@@ -15,12 +15,17 @@ export const TARGET = Object.freeze({
 });
 export const OLD_MARKER = '<!-- cindy-upstream-release {"releaseId":359704127,"tag":"v1.0.0","commitSha":"4f9dcce8835233a1e95341defab3b188cf941cf3"} -->';
 export const NEW_MARKER = `<!-- cindy-upstream-release ${JSON.stringify({ releaseId: TARGET.upstreamId, tag: 'v0.1.126', commitSha: TARGET.upstreamSha })} -->`;
+const DRAFT_PLACEHOLDER = 'untagged-b1623fe0e1ef2c864dec';
 const OWNER_MARKER = `<!-- cindy-personal-release ${JSON.stringify({ runId: String(TARGET.runId), sourceCommit: TARGET.source })} -->`;
 const ROOT = `repos/${TARGET.repository}`;
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 
 export function correctedBody(draft) {
-  assert(draft.id === TARGET.releaseId && draft.tag_name === 'v1.0.13'
+  // GitHub rewrote this unpublished draft to its internal placeholder after a
+  // body-only PATCH. Accept only that observed state, after marker correction.
+  const expectedTag = draft.tag_name === 'v1.0.13'
+    || (draft.tag_name === DRAFT_PLACEHOLDER && draft.body?.includes(NEW_MARKER));
+  assert(draft.id === TARGET.releaseId && draft.name === 'v1.0.13' && expectedTag
     && draft.draft === true && draft.prerelease === false
     && draft.target_commitish === TARGET.source, 'Draft identity changed; no mutation allowed');
   assert(typeof draft.body === 'string'
@@ -73,17 +78,19 @@ export async function repairDraft(api) {
     && comparison.merge_base_commit?.sha === TARGET.upstreamSha, 'Official source is not an ancestor');
   // Re-read immediately before PATCH. Never overwrite a concurrent body edit.
   const current = await api(`${ROOT}/releases/${TARGET.releaseId}`);
-  assert(correctedBody(current) === body && current.body === draft.body, 'Draft changed during validation');
+  assert(correctedBody(current) === body && current.body === draft.body
+    && current.tag_name === draft.tag_name, 'Draft changed during validation');
   assert((await api(`${ROOT}/git/ref/heads/main`)).object?.sha === TARGET.source, 'main changed during validation');
-  if (current.body === body) return { changed: false, verified: true };
+  if (current.body === body && current.tag_name === 'v1.0.13') return { changed: false, verified: true };
   let writeError;
   try {
-    // The only mutation. It cannot publish, retag, replace assets, or change main.
-    await api(`${ROOT}/releases/${TARGET.releaseId}`, { method: 'PATCH', body: { body } });
+    // Preserve the originally allocated draft tag explicitly. This does not
+    // create or move a Git tag, publish, replace assets, or change main.
+    await api(`${ROOT}/releases/${TARGET.releaseId}`, { method: 'PATCH', body: { body, tag_name: 'v1.0.13' } });
   } catch (error) { writeError = error; }
   // A lost PATCH response is uncertain: read back, never repeat the write.
   const saved = await api(`${ROOT}/releases/${TARGET.releaseId}`);
-  assert(correctedBody(saved) === body && saved.body === body,
+  assert(correctedBody(saved) === body && saved.body === body && saved.tag_name === 'v1.0.13',
     `Metadata correction not confirmed${writeError ? '; PATCH response failed' : ''}; inspect before retrying`);
   return { changed: true, verified: true };
 }
