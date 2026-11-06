@@ -1,0 +1,30 @@
+name: Repair v1.0.13 draft upstream identity
+on:
+  push:
+    branches: [maintenance/repair-v1013-upstream-marker]
+permissions:
+  contents: write
+  actions: read
+  pull-requests: read
+concurrency:
+  group: repair-v1013-draft-upstream-identity
+  cancel-in-progress: false
+jobs:
+  repair:
+    if: github.repository == 'polarisaspire/cindy' && github.ref == 'refs/heads/maintenance/repair-v1013-upstream-marker'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify narrow recovery guards
+        run: node --test scripts/__tests__/repair-v1013-draft.test.mjs
+      - name: Correct only the verified unpublished draft marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/repair-v1013-draft.mjs
