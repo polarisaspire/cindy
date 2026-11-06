@@ -40,12 +40,16 @@ export function createRuntime() {
 }
 export function stableReleases(catalog) {
   requireValue(Array.isArray(catalog), 'Release catalog unavailable');
-  return catalog.filter(item => !item.draft && !item.prerelease && STABLE.test(item.tag_name))
-    .sort((a, b) => {
-      const aa = a.tag_name.slice(1).split('.').map(BigInt), bb = b.tag_name.slice(1).split('.').map(BigInt);
-      for (let i = 0; i < 3; i++) if (aa[i] !== bb[i]) return aa[i] < bb[i] ? 1 : -1;
-      return 0;
-    });
+  const releases = catalog.filter(item => !item.draft && !item.prerelease && STABLE.test(item.tag_name));
+  for (const release of releases) {
+    requireValue(typeof release.published_at === 'string' && Number.isFinite(Date.parse(release.published_at))
+      && Number.isSafeInteger(release.id) && release.id > 0,
+    `Stable release has invalid publication metadata: ${release.tag_name}`);
+  }
+  // Upstream restarted at v0.1.x after v1.0.0. Version magnitude, API order
+  // (created_at), and edited timestamps cannot identify the newest publication.
+  // IDs break equal publication timestamps deterministically across API pages.
+  return releases.sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at) || b.id - a.id);
 }
 export function releaseIdentity(release, runtime) {
   requireValue(release && !release.draft && !release.prerelease && STABLE.test(release.tag_name)
