@@ -17,6 +17,102 @@ export const providersSettings = defineSettings({
     ],
     aliases: ['供应商分享', '供应商组', 'provider group', 'provider sharing'],
   },
+  // Dynamic model preferences route to their provider page; no user model IDs
+  // or unmounted drawer anchors are copied into the static search catalog.
+  modelEngines: {
+    id: 'providers.modelEngines',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.advanced.engines',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.enginesHint',
+    ],
+  },
+  modelProtocol: {
+    id: 'providers.modelProtocol',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.custom.fields.wireProtocol',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.protocol.automatic',
+    ],
+  },
+  modelEffort: {
+    id: 'providers.modelEffort',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.advanced.defaultEffort',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.defaultEffortHint',
+    ],
+  },
+  modelContext: {
+    id: 'providers.modelContext',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.advanced.contextLimit',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.contextLimitHint',
+      'settings.providers.models.advanced.contextLimitGptHint',
+      'settings.providers.models.advanced.contextLimitLocalMillionHint',
+    ],
+  },
+  modelImageInput: {
+    id: 'providers.modelImageInput',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.advanced.imageInput',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.supported',
+      'settings.providers.models.advanced.unsupported',
+    ],
+  },
+  modelImageCapability: {
+    id: 'providers.modelImageCapability',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.advanced.imageCapability.label',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.imageCapability.default',
+      'settings.providers.models.advanced.imageCapability.generate',
+      'settings.providers.models.advanced.imageCapability.edit',
+    ],
+  },
+  modelVideoCapability: {
+    id: 'providers.modelVideoCapability',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.advanced.videoCapability.label',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.advanced.videoCapability.default',
+      'settings.providers.models.advanced.videoCapability.generate',
+      'settings.providers.models.advanced.videoCapability.edit',
+    ],
+  },
+  modelPrice: {
+    id: 'providers.modelPrice',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.priceOverride.menu',
+    sectionKey: 'settings.tabs.providers',
+  },
+  modelAdmission: {
+    id: 'providers.modelAdmission',
+    tab: 'providers',
+    targetId: 'settings-panel-providers',
+    titleKey: 'settings.providers.models.disableModel',
+    sectionKey: 'settings.tabs.providers',
+    keywordKeys: [
+      'settings.providers.models.enableModel',
+    ],
+  },
   modelCompaction: {
     id: 'model-compaction',
     tab: 'providers',
