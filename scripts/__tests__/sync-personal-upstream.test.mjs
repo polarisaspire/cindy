@@ -3,14 +3,19 @@
 // Windows/Linux updates; conflicts and partial publication must not ship.
 // Existing publisher tests cannot cover synchronization, dispatch races or retries.
 // Minimal failures: a beta ahead of stable, one conflicting file, failed CI, an
-// already-published tag, or a lost dispatch response. Tier: unit; no real waits.
+// already-published tag, a lost dispatch response, or historical v1.0.0 outranking
+// the later v0.1.x line. Publication dates (not version or API order) must govern
+// staging and release provenance. Tier: unit; no real waits.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { stableReleases, releaseIdentity, publicationGate, syncStableReleases } from '../sync-personal-upstream.mjs';
 
 const old = 'a'.repeat(40), target = 'b'.repeat(40), head = 'c'.repeat(40), merged = 'd'.repeat(40), later = 'e'.repeat(40);
 const repo = 'repos/polarisaspire/cindy', official = 'repos/makecindy/cindy';
-function stable(tag, sha, id = 126) { return { id, tag_name: tag, sha, draft: false, prerelease: false }; }
+function stable(tag, sha, id = 126) {
+  return { id, tag_name: tag, sha, draft: false, prerelease: false,
+    published_at: new Date(Date.UTC(2026, 6, 1) + id * 86_400_000).toISOString() };
+}
 function release(sha, version = '1.0.12', extra = {}) {
   return { id: 10, tag_name: `v${version}`, draft: false, prerelease: false, html_url: `https://github.com/polarisaspire/cindy/releases/tag/v${version}`,
     body: `<!-- cindy-personal-release ${JSON.stringify({ runId: '10', sourceCommit: sha })} -->`,
@@ -93,11 +98,34 @@ function fixture(options = {}) {
   return { state, runtime, run };
 }
 
-test('stable selection excludes drafts/betas and compares numeric versions', () => {
-  assert.deepEqual(stableReleases([
-    stable('v0.1.9', old), stable('v0.1.10', target), { ...stable('v0.1.11', later), draft: true },
-    { ...stable('v0.1.12', later), prerelease: true }, stable('v0.1.99-beta', later), stable('mobile-100', later),
-  ]).map(item => item.tag_name), ['v0.1.10', 'v0.1.9']);
+test('stable selection follows publication time across version resets, not API or commit order', () => {
+  const historical = { ...stable('v1.0.0', old, 1), created_at: '2027-01-01T00:00:00Z', updated_at: '2027-01-02T00:00:00Z' };
+  const newest = { ...stable('v0.1.126', target), created_at: '2020-01-01T00:00:00Z' };
+  const catalog = [historical, stable('v0.1.125', old, 125), newest,
+    { ...stable('v2.0.0', later, 130), draft: true, published_at: null },
+    { ...stable('v3.0.0', later, 131), prerelease: true },
+    stable('v0.1.127-beta', later, 127), stable('mobile-100', later, 132)];
+  const expected = ['v0.1.126', 'v0.1.125', 'v1.0.0'];
+  assert.deepEqual(stableReleases(catalog).map(item => item.tag_name), expected);
+  assert.equal(catalog[0], historical, 'selection must not mutate the API catalog');
+  assert.deepEqual(stableReleases(catalog.toReversed()).map(item => item.tag_name), expected);
+  // Equal-second publications use release ID, never the larger version number.
+  assert.deepEqual(stableReleases([historical, { ...newest, published_at: historical.published_at }])
+    .map(item => item.tag_name), ['v0.1.126', 'v1.0.0']);
+});
+
+test('invalid stable publication metadata blocks staging and a new publication instead of guessing', async () => {
+  for (const metadata of [{ published_at: undefined }, { published_at: null }, { published_at: 'invalid' },
+    { id: 0 }, { id: Number.MAX_SAFE_INTEGER + 1 }]) {
+    const f = fixture(); Object.assign(f.state.upstream[0], metadata);
+    await assert.rejects(syncStableReleases(f.runtime), /invalid publication metadata/);
+    f.state.latest = release(old); f.state.tags.set('v1.0.12', old); f.state.addCI();
+    assert.throws(() => publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${head}` }, f.runtime),
+      /invalid publication metadata/);
+    assert.equal(f.state.remote, head);
+    assert.ok(!f.state.calls.some(call => call[0] === 'git' && ['merge', 'push', 'config'].includes(call[1])));
+    assert.ok(!f.state.calls.some(call => call[0] === 'api' && call[2].method === 'POST'));
+  }
 });
 
 test('release identity resolves the tag commit, not a moving target_commitish', () => {
@@ -113,8 +141,8 @@ test('already shipped upstream release creates no merge, CI, package or release'
   assert.ok(!f.state.calls.some(call => call[0] === 'git' && ['merge', 'push'].includes(call[1])));
 });
 
-test('staging preserves fork history and runs exact-source CI but never publishes', async () => {
-  const f = fixture();
+test('staging does not stop at an already-shipped historical higher version', async () => {
+  const f = fixture(); f.state.upstream.unshift(stable('v1.0.0', old, 1));
   await syncStableReleases(f.runtime);
   assert.deepEqual(f.state.parents.get(merged), [head, target]);
   assert.equal(f.state.latest.tag_name, 'v1.0.12');
@@ -148,8 +176,8 @@ test('a transient existing CI failure retries the original attempt once', async 
   assert.equal(f.state.latest.tag_name, 'v1.0.12');
 });
 
-test('multiple new formal tags are staged oldest-first before one final CI', async () => {
-  const f = fixture(); f.state.upstream.unshift(stable('v0.1.127', later, 127));
+test('multiple new formal tags are staged in publication order before one final CI', async () => {
+  const f = fixture(); f.state.upstream.push(stable('v0.1.1', later, 127));
   await syncStableReleases(f.runtime);
   assert.deepEqual(f.state.calls.filter(call => call[0] === 'git' && call[1] === 'merge').map(call => call.at(-1)), [target, later]);
   assert.equal(f.state.runs.length, 1);
@@ -172,12 +200,13 @@ test('an unfinished draft blocks main advancement and is never auto-published by
   assert.equal(f.state.runs.length, 0);
 });
 
-test('staging request is tied to current main and an existing formal tag', async () => {
-  const f = fixture();
+test('staging request is tied to current main and caps the batch by publication order', async () => {
+  const f = fixture(); f.state.upstream.unshift(stable('v1.0.0', old, 1), stable('v0.1.1', later, 127));
   await assert.rejects(syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.126/${later}`, sourceSha: later }), /not in main/);
   await assert.rejects(syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.999/${head}`, sourceSha: head }), /not stable/);
   await syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.126/${head}`, sourceSha: head });
   assert.equal(f.state.remote, merged);
+  assert.deepEqual(f.state.calls.filter(call => call[0] === 'git' && call[1] === 'merge').map(call => call.at(-1)), [target]);
   await syncStableReleases(f.runtime, { requestRef: `automation/upstream-sync/v0.1.126/${head}`, sourceSha: head });
   assert.equal(f.state.runs.length, 1, 'retry after staging reuses CI without a second merge or publication');
 });
@@ -213,9 +242,14 @@ test('replaying a release request for an already-published source is a no-op', (
   assert.equal(publicationGate({ sourceSha: head, validateOnly: true }, f.runtime).proceed, true);
 });
 
-test('a new official release after review blocks publication until it is integrated', () => {
+test('publication requires and records the newest stable after a version reset', () => {
   const f = fixture(); f.state.addCI(); f.state.latest = release(old); f.state.tags.set('v1.0.12', old);
+  f.state.upstream.unshift(stable('v1.0.0', old, 1));
   assert.throws(() => publicationGate({ sourceSha: head, requestRef: `automation/personal-release/${head}` }, f.runtime), /does not contain/);
+  f.state.parents.set(merged, [head, target]); f.state.head = f.state.remote = merged; f.state.addCI();
+  const result = publicationGate({ sourceSha: merged, requestRef: `automation/personal-release/${merged}` }, f.runtime);
+  assert.equal(result.proceed, true);
+  assert.deepEqual(result.upstream, { releaseId: 126, tag: 'v0.1.126', commitSha: target });
 });
 
 test('previously recorded upstream identity cannot silently change', async () => {
