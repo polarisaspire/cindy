@@ -57,10 +57,10 @@ jobs:
     # Dependabot secrets,再删掉这一行条件。上面那段说明了权限侧不需要额外动作,
     # 但这条链路(Dependabot + reusable workflow + permissions key)没有实机验证过,
     # 真要恢复时先拿一个 dependabot PR 实跑确认,别只依赖文档推断。
-    # 仅本 fork 的 PR #6 由维护者要求自行审阅，不调用外部审查代理。
-    # 这是单次例外；其他 PR、client-ci 和仓库合并规则保持原样。
+    # 仅本 fork 的 PR #6 与 #9 由维护者要求自行审阅，不调用外部审查代理。
+    # 这是逐个 PR 的单次例外；其他 PR、client-ci 和仓库合并规则保持原样。
     if: >-
-      !(github.repository == 'polarisaspire/cindy' && github.event.pull_request.number == 6) &&
+      !(github.repository == 'polarisaspire/cindy' && contains(fromJSON('[6, 9]'), github.event.pull_request.number)) &&
       github.event.pull_request &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository &&
