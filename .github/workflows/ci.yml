@@ -202,6 +202,14 @@ jobs:
         # Native canvas badge tests need a real bold sans-serif font. The runner
         # image only promises emoji fonts; keep this prerequisite explicit.
         run: |
+          # Ubuntu's archive hostnames have repeatedly failed DNS on runners.
+          # Use the Kernel Archives' Ubuntu mirror without changing Ubuntu's
+          # archive signing keys or the image's security fallback.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i -e '/azure\.archive\.ubuntu\.com/d' \
+              -e 's|https://archive\.ubuntu\.com/ubuntu/|https://mirrors.kernel.org/ubuntu/|' \
+              /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update
           sudo apt-get install --yes libarchive-tools binutils desktop-file-utils xdg-utils fontconfig fonts-dejavu-core
           fc-match 'sans-serif:style=Bold'
