@@ -1060,8 +1060,10 @@ describe('maker:event hot path ordering', () => {
       /const hasEffectiveGatewayRoute\s*=\s*!isRemoteCodexSession\s*&&\s*!isCustomProviderRoute\s*&&/,
     );
     expect(codexDoneSource).toContain('const isCodexXaiProviderRoute =');
+    // PR #10: global gateway auth applies only to implicit/xd routes. An explicit
+    // subscription must keep its value-estimate billing (behavioral regression in sessionEventPipeline).
     expect(codexDoneSource).toMatch(
-      /codexAuthInjection === 'env-key'\s*\|\|\s*isCodexBudgetRoute\s*\|\|\s*\(sessionProvider === 'xd' && hasGatewayKey\)/,
+      /\(\(sessionProvider == null \|\| sessionProvider === 'xd'\) && codexAuthInjection === 'env-key'\)\s*\|\|\s*isCodexBudgetRoute\s*\|\|\s*\(sessionProvider === 'xd' && hasGatewayKey\)/,
     );
     expect(codexDoneSource).not.toContain("sessionProvider !== 'xai'");
     expect(codexDoneSource).not.toContain('isEstimate: true');
