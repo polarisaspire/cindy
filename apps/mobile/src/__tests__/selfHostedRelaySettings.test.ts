@@ -8,6 +8,7 @@
  * - tier：unit，内存存储替身；不读取真实凭证、不访问网络。
  * - 实测耗时：单独运行 2.29 秒，用例执行 21ms（Windows，pnpm --filter mobile exec vitest run 此文件）。
  */
+import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const storage = vi.hoisted(() => ({
@@ -34,6 +35,7 @@ vi.mock('@/auth/secureStorage', () => ({
     storage.secrets.delete(key);
   }),
 }));
+vi.mock('expo-crypto', () => ({ getRandomBytes: (size: number) => new Uint8Array(randomBytes(size)) }));
 vi.mock('@/debug/mobileDebugLog', () => ({ mobileDebugLog: vi.fn() }));
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -155,9 +157,12 @@ it('restores the saved credentials if joining a different relay cannot save its 
 it('does not apply a late switch from a previous account to the current account', async () => {
   await join();
   let finishWrite!: () => void;
+  let writeStarted!: () => void;
+  const started = new Promise<void>((resolve) => { writeStarted = resolve; });
   vi.mocked(AsyncStorage.setItem).mockImplementationOnce(
     (key, value) =>
       new Promise<void>((resolve) => {
+        writeStarted();
         finishWrite = () => {
           storage.config.set(key, value);
           resolve();
@@ -165,10 +170,11 @@ it('does not apply a late switch from a previous account to the current account'
       }),
   );
   const switching = settings.clearSelfHostedRelay();
+  await started;
   setMobileAuthOwner('other-account');
   await waitForSelfHostedRelayRoute();
-  await join('other-relay');
   finishWrite();
   await switching;
+  await join('other-relay');
   expect(getActiveSelfHostedRelay()?.relayId).toBe('other-relay');
 });

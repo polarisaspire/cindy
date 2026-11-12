@@ -1,4 +1,12 @@
 {
+  "agentNet": {
+    "enabled": "Ativar Agent-Net",
+    "onlyEncrypted": "Usar apenas conexões criptografadas",
+    "hint": "Os dispositivos usam criptografia de ponta a ponta. O modo somente criptografado requer Agent-Net nos dois dispositivos.",
+    "updateRequired": "Instale a versão mais recente do aplicativo para usar o Agent-Net.",
+    "notConfigured": "Este relay ainda não oferece Agent-Net. Atualize-o ou entre em um relay V2.",
+    "failed": "Não foi possível alterar as configurações do Agent-Net. Verifique a conexão com o relay e tente novamente."
+  },
   "settings": {
     "sectionTitle": "Serviço de retransmissão",
     "currentLabel": "Serviço de retransmissão",
@@ -13,6 +21,14 @@
     "confirmAction": "Mudar para o relay oficial",
     "switchFailed": "Não foi possível voltar ao relay oficial. Tente novamente em instantes.",
     "pushUnavailable": "Enquanto você usa seu próprio relay, as notificações de tarefas dos seus computadores não são enviadas para este celular.",
+    "accountManagedOn": "Gerenciado em “{{device}}”",
+    "accountSwitchTitle": "Entrar em “{{name}}”?",
+    "accountSwitchBody": "Este retransmissor é da sua conta. “{{device}}” libera este celular automaticamente, sem link de compartilhamento. Enquanto você usar um retransmissor próprio, este celular não recebe as notificações de tarefas do computador.",
+    "accountSwitchAction": "Entrar",
+    "sharedHint": "Seus dispositivos se conectam por um retransmissor compartilhado com você em {{address}} e alcançam só seus próprios dispositivos. Login, modelos, tarefas compartilhadas e outros serviços continuam usando o {{appName}}.",
+    "sharedCurrent": "{{name}} (compartilhado por {{owner}})",
+    "accountSharedBy": "Compartilhado por {{owner}} · entrou em “{{device}}”",
+    "accountSharedOn": "Entrou em “{{device}}”",
     "useSaved": "Usar “{{name}}”",
     "forget": "Sair e esquecer o relay",
     "forgetTitle": "Sair do relay?",
@@ -41,7 +57,10 @@
     "signedOut": "Entre no {{appName}} primeiro e depois entre neste relay.",
     "signIn": "Entrar",
     "invalidLink": "Este link de entrada é inválido ou expirou. Crie outro no computador.",
-    "cancelled": "A entrada foi cancelada. Para entrar neste relay, crie um novo link de entrada no computador."
+    "cancelled": "A entrada foi cancelada. Para entrar neste relay, crie um novo link de entrada no computador.",
+    "accountRequesting": "Pedindo a “{{device}}” para liberar…",
+    "accountWaiting": "Entrando, aguardando “{{device}}”…",
+    "openOnComputer": "Este retransmissor foi compartilhado por outra conta. Abra este link no seu computador para entrar. Depois que o computador entrar, este celular o verá em Ajustes > Retransmissor e poderá entrar com um toque."
   },
   "errors": {
     "unreachable": "Não foi possível acessar este relay. Verifique se o celular e o computador estão na mesma rede ou se o celular consegue abrir este endereço.",
@@ -56,6 +75,9 @@
     "ownerMismatch": "O relay retornou um certificado que não foi emitido pelo proprietário indicado no link de entrada. Você pode estar conectado a um relay falso, por isso a entrada foi interrompida.",
     "failed": "Não foi possível entrar no relay. Tente novamente mais tarde.",
     "saveFailed": "A solicitação foi aprovada, mas não foi possível salvar a credencial do relay neste celular. Crie um novo link de entrada no computador e tente novamente.",
-    "credentialUnavailable": "Este celular não tem uma credencial de relay utilizável. Entre novamente ou volte ao relay oficial nas Configurações."
+    "credentialUnavailable": "Este celular não tem uma credencial de relay utilizável. Entre novamente ou volte ao relay oficial nas Configurações.",
+    "ownerUnavailable": "“{{device}}” não respondeu. Verifique se o {{appName}} está aberto e on-line lá ou peça um link de compartilhamento.",
+    "relayUnavailable": "“{{device}}” não usa mais este retransmissor.",
+    "accountDirectoryUnavailable": "Não foi possível acessar o serviço de contas do {{appName}}, então os retransmissores da sua conta não foram carregados. Tente mais tarde ou peça um link de compartilhamento."
   }
 }
