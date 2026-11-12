@@ -2273,6 +2273,23 @@ describe('usage through the production event pipeline', () => {
     },
   );
 
+  // Windows CLI-reuse regression, unit: a native account task must not inherit
+  // the unrelated global gateway host's billing route (missing private OAuth).
+  it('prices an explicit OpenAI subscription independently of the global gateway host', async () => {
+    const h = harness();
+    pricing(true);
+    effects.fn('getActiveCatalog').mockReturnValue({ providers: [{ id: 'openai', access: { kind: 'subscription' } }] });
+    effects.fn('getCodexProxyAuthInjection').mockReturnValue('env-key');
+    h.emit(event('done', { usage: usage('codex') }, { source: 'codex' }));
+    await microtasks();
+    expect(effects.fn('recordSchedulerTurnCost')).toHaveBeenCalledWith(expect.objectContaining({
+      money: expect.objectContaining({ kind: 'value-estimate' }),
+      turnUsageDetails: expect.objectContaining({ providerId: 'openai', billingSource: 'subscription' }),
+    }));
+    expect(effects.fn('recordSessionTurnSpend')).not.toHaveBeenCalled();
+    await h.dispose();
+  });
+
   it.each([
     ['codex', false],
     ['codex', true],

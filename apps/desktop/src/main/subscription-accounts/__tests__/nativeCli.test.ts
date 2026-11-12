@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
   binary: '/fixture/codex' as string | null,
   spawn: vi.fn(),
   error: false,
+  errorMessage: 'fixture-secret-must-not-leak',
+  expired: false,
   hold: false,
   accountResult: undefined as unknown,
   oldAuthenticated: false,
@@ -41,6 +43,7 @@ import {
   readNativeAccount,
   loginNativeAccount,
   readNativeCodexTokens,
+  readNativeCodexAccountIdentity,
   readLegacyCodexProviderAccount,
   loginLegacyCodexProviderAccount,
 } from '../nativeCli.js';
@@ -54,6 +57,8 @@ const children: (EventEmitter & {
 beforeEach(() => {
   h.binary = '/fixture/codex';
   h.error = false;
+  h.errorMessage = 'fixture-secret-must-not-leak';
+  h.expired = false;
   h.hold = false;
   h.accountResult = undefined;
   h.oldAuthenticated = false;
@@ -72,6 +77,11 @@ beforeEach(() => {
     child.stdin.write.mockImplementation((line: string) => {
       const request = JSON.parse(line);
       if (!request.id || h.hold) return;
+      if (h.expired && request.method === 'account/rateLimits/read') {
+        h.expired = false;
+        queueMicrotask(() => child.stdout.emit('data', Buffer.from(JSON.stringify({ id: request.id, error: { message: '401 token_expired' } }) + '\n')));
+        return;
+      }
       queueMicrotask(() =>
         child.stdout.emit(
           'data',
@@ -80,9 +90,9 @@ beforeEach(() => {
               request.id === 1
                 ? { id: 1, result: {} }
                 : h.error
-                  ? { id: 2, error: { message: 'fixture-secret-must-not-leak' } }
+                  ? { id: 2, error: { message: h.errorMessage } }
                   : {
-                      id: 2,
+                      id: request.id,
                       result: h.accountResult ?? {
                         account: {
                           type: 'chatgpt',
@@ -122,6 +132,31 @@ describe('Claude profile renewal', () => {
   });
 });
 describe('official Codex profiles', () => {
+  // Native default quota controls must preserve the old read-only renewal path.
+  // A correlated token_expired reply is recoverable; reset mutations are never replayed.
+  it('renews an expired quota read once through the same CLI process', async () => {
+    h.expired = true;
+    h.accountResult = { rateLimits: { primary: { usedPercent: 57 } } };
+    expect(await codexAccountRpc(path.join(tmpdir(), 'fixture-codex'), 'account/rateLimits/read', {})).toEqual(h.accountResult);
+    const requests = children[0].stdin.write.mock.calls.map(([line]) => JSON.parse(line));
+    expect(requests.filter(r => r.method === 'account/read')).toEqual([
+      { id: 3, method: 'account/read', params: { refreshToken: true } },
+    ]);
+    expect(requests.filter(r => r.method === 'account/rateLimits/read')).toHaveLength(2);
+    expect(h.spawn).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['account/rateLimitResetCredit/consume', '401 token_expired'],
+    ['account/rateLimits/read', '401 token_expired token_revoked'],
+  ])('does not renew or replay %s after %s', async (method, message) => {
+    h.error = true;
+    h.errorMessage = message;
+    await expect(codexAccountRpc(path.join(tmpdir(), 'fixture-codex'), method, {}))
+      .rejects.toThrow('Codex account request failed');
+    const requests = children[0].stdin.write.mock.calls.map(([line]) => JSON.parse(line));
+    expect(requests.filter(r => r.method === method)).toHaveLength(1);
+    expect(requests.some(r => r.method === 'account/read')).toBe(false);
+  });
   // Upgrade 2026-11-11, standard: a revoked imported login cannot be resurrected
   // by reading its still-present token file; successful reads keep the old native profile.
   it('honors the old connection revocation before reading its native account', async () => {
@@ -169,7 +204,8 @@ describe('official Codex profiles', () => {
       await writeFile(
         authPath,
         JSON.stringify({
-          tokens: { access_token: 'fixture-token-a', account_id: 'fixture-account-a' },
+          tokens: { access_token: 'fixture-token-a', account_id: 'fixture-account-a',
+            id_token: 'fixture.' + Buffer.from(JSON.stringify({ sub: 'fixture-user', email: 'fixture@example.test' })).toString('base64url') + '.invalid' },
         }),
       );
       const [first, concurrent] = await Promise.all([
@@ -180,6 +216,10 @@ describe('official Codex profiles', () => {
       expect(concurrent.accessToken).toBe(first.accessToken);
       expect(first.chatgptAccountId).toBe('fixture-account-a');
       expect(first.canDispatch()).toBe(true);
+      const identity = await readNativeCodexAccountIdentity(dir);
+      expect(identity.email).toBe('fixture@example.test');
+      expect(identity.chatgptAccountId).toBe(first.chatgptAccountId);
+      expect(identity).not.toHaveProperty('accessToken');
       await writeFile(
         authPath,
         JSON.stringify({
@@ -187,6 +227,7 @@ describe('official Codex profiles', () => {
         }),
       );
       expect(first.canDispatch()).toBe(false);
+      expect(identity.canDispatch()).toBe(false);
       const second = await readNativeCodexTokens(dir);
       expect(second.chatgptAccountId).toBe('fixture-account-b');
       await rm(authPath);
