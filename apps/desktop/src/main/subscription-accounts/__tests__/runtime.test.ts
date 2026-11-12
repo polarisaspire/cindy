@@ -28,6 +28,9 @@ const h = vi.hoisted(() => ({
   importedLogin: vi.fn(),
   accountAllowed: vi.fn(),
   setLegacyPaused: vi.fn(),
+  rpc: vi.fn(),
+  tokens: vi.fn(),
+  identity: vi.fn(),
 }));
 vi.mock('../../appSessionState.js', () => ({
   activeOwnerScopeKey: () => h.owner,
@@ -39,6 +42,9 @@ vi.mock('../../maker-host/nativeProviderAuthBinding.js', () => ({
   isNativeProviderAuthSharedSystemCredential: () => h.bound && h.shared,
 }));
 vi.mock('../nativeCli.js', () => ({
+  codexAccountRpc: h.rpc,
+  readNativeCodexTokens: h.tokens,
+  readNativeCodexAccountIdentity: h.identity,
   readNativeAccount: h.read,
   readNativeAccountUsage: h.usage,
   loginNativeAccount: h.login,
@@ -94,6 +100,7 @@ import {
   readSubscriptionPoolAccountUsages,
   runSubscriptionAccountCommand,
   observeSubscriptionAccountUsage,
+  readDefaultCodexAccountCredentials,
 } from '../runtime.js';
 import { providerGroupMemberUsageState, providerGroupCodexUsageFromReads, providerGroupUsageSnapshot } from '../../provider-group/usage.js';
 import { readLegacySubscriptionQuota } from '../legacyQuota.js';
@@ -120,6 +127,72 @@ beforeEach(() => {
   h.importedLogin.mockReset().mockResolvedValue(undefined);
   h.accountAllowed.mockReset().mockReturnValue(true);
   h.setLegacyPaused.mockReset();
+  h.rpc.mockReset();
+  h.tokens.mockReset();
+  h.identity.mockReset();
+});
+
+// Windows CLI-reuse regression (2026-11-12), unit: the task uses the authorized
+// native default while the old private home has no OAuth. Existing tests cover
+// dispatch only; quota reads/reset consumption must use that same default home.
+describe('native default Codex account controls', () => {
+  it('uses one live credential generation without combining it with a cached account label', async () => {
+    h.pools.openai = { strategy: 'least', accounts: [account('default')] };
+    h.read.mockResolvedValue({ authenticated: true, identity: 'old@example.test' });
+    h.tokens.mockResolvedValue({ accessToken: 'fixture-new-token', chatgptAccountId: 'new-workspace', canDispatch: () => true });
+    h.identity.mockResolvedValue({ email: 'new@example.test', chatgptAccountId: 'new-workspace', canDispatch: () => true });
+    expect(await readDefaultCodexAccountCredentials()).toEqual({ accessToken: 'fixture-new-token', chatgptAccountId: 'new-workspace', email: 'new@example.test' });
+    h.identity.mockResolvedValue({ email: 'other@example.test', chatgptAccountId: 'other-workspace', canDispatch: () => true });
+    expect(await readDefaultCodexAccountCredentials()).toBeNull();
+    h.bound = false;
+    expect(await readDefaultCodexAccountCredentials()).toBeNull();
+  });
+  it('reads quota and consumes the selected reset through the authorized CLI home', async () => {
+    h.pools.openai = { strategy: 'least', accounts: [account('default')] };
+    const result = { rateLimits: { primary: { usedPercent: 57 } }, rateLimitResetCredits: { availableCount: 2 } };
+    h.rpc.mockResolvedValueOnce(result).mockResolvedValueOnce({ outcome: 'reset' });
+    const oldRead = vi.fn(async () => { throw new Error('no_oauth'); });
+    const oldConsume = vi.fn(async () => { throw new Error('no_oauth'); });
+    const agent = withSubscriptionAccounts({ kind: 'codex', readAccountRateLimits: oldRead,
+      consumeAccountRateLimitResetCredit: oldConsume } as unknown as BaseAgent);
+    expect(await agent.readAccountRateLimits('openai')).toEqual(result);
+    const params = { idempotencyKey: 'reset-request' };
+    await agent.consumeAccountRateLimitResetCredit(params, 'openai');
+    const directory = h.read.mock.calls[0][1];
+    expect(h.rpc.mock.calls).toEqual([
+      [directory, 'account/rateLimits/read', {}],
+      [directory, 'account/rateLimitResetCredit/consume', params],
+    ]);
+    expect(oldRead).not.toHaveBeenCalled();
+    expect(oldConsume).not.toHaveBeenCalled();
+    h.bound = false;
+    await expect(agent.readAccountRateLimits('openai')).rejects.toThrow();
+    expect(h.rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps legacy private-home and named-provider controls on their original adapter', async () => {
+    h.pools.openai = { strategy: 'least', legacyCodexDefault: true, accounts: [account('default')] };
+    const read = vi.fn(async (_provider?: string) => ({ rateLimits: {} }));
+    const agent = withSubscriptionAccounts({ kind: 'codex', readAccountRateLimits: read } as unknown as BaseAgent);
+    await agent.readAccountRateLimits('openai');
+    h.pools.openai.legacyCodexDefault = false;
+    await agent.readAccountRateLimits('openai-other');
+    expect(read.mock.calls).toEqual([['openai'], ['openai-other']]);
+    expect(h.rpc).not.toHaveBeenCalled();
+  });
+
+  it.each(['owner', 'disconnect'] as const)('rejects a quota reply after %s changes', async change => {
+    h.pools.openai = { strategy: 'least', accounts: [account('default')] };
+    h.rpc.mockImplementation(async () => {
+      if (change === 'owner') h.owner += ':changed';
+      else h.pools.openai!.disconnected = true;
+      return { rateLimits: {} };
+    });
+    const read = vi.fn();
+    const agent = withSubscriptionAccounts({ kind: 'codex', readAccountRateLimits: read } as unknown as BaseAgent);
+    await expect(agent.readAccountRateLimits('openai')).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled();
+  });
 });
 
 describe('tasks using imported Codex connections', () => {

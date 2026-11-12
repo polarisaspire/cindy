@@ -14,6 +14,7 @@ import {
 import { parseClaudeOAuthUsageResponse } from '../../shared/claudeSubscriptionUsage.js';
 import { providerGroupCodexUsageFromReads } from '../provider-group/usage.js';
 import type { SubscriptionProvider } from '../../shared/subscriptionAccounts.js';
+import { parseCodexAccountIdentity } from '../maker-host/codex-auth-identity.js';
 
 /** Preserve the old adapter's owner/revocation checks; do not adopt ~/.codex on upgrade. */
 export async function readLegacyCodexAccount(): Promise<AuthState> {
@@ -139,7 +140,7 @@ function codexCredits(raw: unknown) {
 const codexRefreshes = new Map<string, Promise<unknown>>();
 
 /** Codex's existing external-auth bridge. Never used for Claude or returned through IPC. */
-export async function readNativeCodexTokens(directory: string, refresh = false) {
+async function readNativeCodexCredentials(directory: string, refresh = false) {
   if (refresh) {
     let pending = codexRefreshes.get(directory);
     if (!pending) {
@@ -164,7 +165,8 @@ export async function readNativeCodexTokens(directory: string, refresh = false) 
     const before = await file.stat();
     if (before.size > 1024 * 1024)
       throw new Error('Codex account authentication bridge is unavailable');
-    const raw = JSON.parse(await file.readFile('utf8'));
+    const rawText = await file.readFile('utf8');
+    const raw = JSON.parse(rawText);
     const after = await file.stat();
     const canDispatch = () => {
       try {
@@ -183,11 +185,24 @@ export async function readNativeCodexTokens(directory: string, refresh = false) 
     return {
       accessToken: raw.tokens.access_token as string,
       chatgptAccountId: raw.tokens.account_id as string,
+      email: parseCodexAccountIdentity(rawText)?.label ?? null,
       canDispatch,
     };
   } finally {
     await file.close();
   }
+}
+
+/** Keep non-token identity metadata out of the external-auth token bridge. */
+export async function readNativeCodexTokens(directory: string, refresh = false) {
+  const { email: _email, ...tokens } = await readNativeCodexCredentials(directory, refresh);
+  return tokens;
+}
+
+/** Live identity and its file-generation proof, without returning any token. */
+export async function readNativeCodexAccountIdentity(directory: string) {
+  const { accessToken: _accessToken, ...identity } = await readNativeCodexCredentials(directory);
+  return identity;
 }
 
 /** Short-lived app-server control connection: no thread or model request is made. */
@@ -207,6 +222,7 @@ export function codexAccountRpc(
     });
     let settled = false;
     let buffer = '';
+    let renewedQuotaRead = false;
     const finish = (error?: Error, result?: unknown) => {
       if (settled) return;
       settled = true;
@@ -233,11 +249,25 @@ export function codexAccountRpc(
         } catch {
           continue;
         }
-        if (message.error) return finish(new Error('Codex account request failed'));
+        if (message.error) {
+          const reason = typeof message.error === 'object' && message.error !== null
+            ? (message.error as { message?: unknown }).message : undefined;
+          // Preserve the existing account-control renewal: only a correlated,
+          // read-only quota request may retry after the CLI renews OAuth itself.
+          if (message.id === 2 && method === 'account/rateLimits/read' && !renewedQuotaRead
+            && typeof reason === 'string' && /\b401\b/.test(reason) && /\btoken_expired\b/.test(reason)
+            && !/token_revoked|token_invalidated|refresh_token_reused/.test(reason)) {
+            renewedQuotaRead = true;
+            send({ id: 3, method: 'account/read', params: { refreshToken: true } });
+            continue;
+          }
+          return finish(new Error('Codex account request failed'));
+        }
         if (message.id === 1) {
           send({ method: 'initialized', params: {} });
           send({ id: 2, method, params });
-        } else if (message.id === 2) finish(undefined, message.result);
+        } else if (message.id === 3 && renewedQuotaRead) send({ id: 2, method, params });
+        else if (message.id === 2) finish(undefined, message.result);
       }
     });
     send({

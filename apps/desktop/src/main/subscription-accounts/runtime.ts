@@ -44,6 +44,7 @@ import {
   readNativeAccount,
   readNativeAccountUsage,
   readNativeCodexTokens,
+  readNativeCodexAccountIdentity,
   readLegacyCodexAccount,
   loginLegacyCodexAccount,
   readLegacyCodexProviderAccount,
@@ -576,6 +577,53 @@ export interface SubscriptionAccountLease {
   running(active: boolean): void;
   release(): void;
 }
+
+/** The authorized CLI default has its own home; it need not have a link in Cindy's legacy home. */
+export function usesNativeDefaultCodexAccount(providerId?: string): boolean {
+  if (providerId && providerId !== 'openai') return false;
+  const pool = readPool('openai');
+  return !!pool && !pool.legacyCodexDefault;
+}
+
+/** Account controls always address the default, never the scheduler's next account.
+ * Reuse the dispatch capability so owner/revocation checks fence both sides of the RPC.
+ */
+export async function withDefaultCodexAccount<T>(
+  operation: (account: NativeSubscriptionAccount) => Promise<T>,
+  providerId?: string,
+): Promise<T | undefined> {
+  if (!usesNativeDefaultCodexAccount(providerId)) return undefined;
+  const lease = await acquireSubscriptionAccount('openai', undefined, [], true, { accountId: 'default' });
+  if (!lease) throw new Error('Subscription accounts changed');
+  try {
+    lease.account.assertCurrent();
+    const result = await operation(lease.account);
+    lease.account.assertCurrent();
+    return result;
+  } finally {
+    lease.release();
+  }
+}
+
+/** Host-only credentials from one live file generation. A missing/revoked native
+ * default is null, not permission to fall back to a different legacy login.
+ */
+export async function readDefaultCodexAccountCredentials(providerId?: string) {
+  if (!usesNativeDefaultCodexAccount(providerId)) return undefined;
+  try {
+    return await withDefaultCodexAccount(async account => {
+      const tokens = await account.readCodexTokens!();
+      const identity = await readNativeCodexAccountIdentity(account.configDir);
+      if (tokens.canDispatch?.() === false || !identity.canDispatch()
+        || tokens.chatgptAccountId !== identity.chatgptAccountId) throw new Error('ChatGPT account changed');
+      return { accessToken: tokens.accessToken, chatgptAccountId: tokens.chatgptAccountId,
+        email: identity.email?.includes('@') ? identity.email : null };
+    }, providerId);
+  } catch {
+    return null;
+  }
+}
+
 /** Await status first; selection and reservation then happen in one synchronous segment. */
 export async function acquireSubscriptionAccount(
   provider: SubscriptionProvider,

@@ -74,7 +74,7 @@ import { desktopCodexAuthAdapter } from '../maker-host/auth-adapters.js';
 import { hasClaudeNativeLogin } from '../maker-host/claude-native-auth.js';
 import { peekClaudeCliLoginStatus } from '../maker-host/claude-native-cli-status.js';
 import { readClaudeCliPlanUsage } from '../maker-host/claude-native-cli.desktop.js';
-import { observeSubscriptionAccountUsage } from '../subscription-accounts/runtime.js';
+import { observeSubscriptionAccountUsage, usesNativeDefaultCodexAccount, readDefaultCodexAccountCredentials } from '../subscription-accounts/runtime.js';
 import { getGrokAccessToken, hasGrokOAuthLogin } from '../maker-host/grok-oauth-login.desktop.js';
 import { outboundFetch } from '../maker-host/outbound-fetch.desktop.js';
 import { CodexResetAutoUse, parseCodexResetAutoUse } from '../usage/codexResetAutoUse.js';
@@ -226,8 +226,16 @@ export function readCodexAccountUsageSnapshotWithWebRefresh(requestedProviderId?
   const existing = codexUsageReaders.get(key);
   if (existing) return existing(options);
 const reader = createCodexAccountUsageSnapshotReader({
-  readAccessToken: () => scope === activeOwnerScopeKey() ? desktopCodexAuthAdapter.getAccessToken(providerId) : Promise.reject(new Error('Account scope changed')),
-  readAccountId: () => desktopCodexAuthAdapter.getAccountId(providerId),
+  readAccessToken: async () => {
+    if (scope !== activeOwnerScopeKey()) throw new Error('Account scope changed');
+    const native = await readDefaultCodexAccountCredentials(providerId);
+    return native === undefined ? desktopCodexAuthAdapter.getAccessToken(providerId) : native?.accessToken ?? null;
+  },
+  readAccountId: async () => {
+    if (scope !== activeOwnerScopeKey()) throw new Error('Account scope changed');
+    const native = await readDefaultCodexAccountCredentials(providerId);
+    return native === undefined ? desktopCodexAuthAdapter.getAccountId(providerId) : native?.chatgptAccountId ?? null;
+  },
   fetchWebUsageSnapshot: fetchCodexWebUsageSnapshot,
   recordSnapshot: (snapshot) => scope === activeOwnerScopeKey() ? recordCodexAccountUsageSnapshot(snapshot, providerId) : Promise.resolve(),
   clearSnapshot: () => scope === activeOwnerScopeKey() ? clearCodexAccountUsageSnapshot(providerId) : Promise.resolve(),
@@ -275,6 +283,16 @@ export function onCodexAutoResetRestored(listener: (providerId: string) => Promi
 export function registerMakerUsageIpc(maker: Maker): void {
   log.info('registering maker:usage:* IPC handlers');
 
+  async function readResetAccountIdentity(providerId?: string) {
+    const native = await readDefaultCodexAccountCredentials(providerId);
+    if (native === null) throw new Error('ChatGPT account is unavailable');
+    // Both fields belong to the live credential file generation, not the cached CLI label.
+    if (native) return { email: native.email, accountId: native.chatgptAccountId };
+    const state = await desktopCodexAuthAdapter.getState({ providerId });
+    const accountId = state.authSource === 'oauth' ? await desktopCodexAuthAdapter.getAccountId(providerId) : null;
+    return { email: state.authSource === 'oauth' ? state.identity ?? null : null, accountId };
+  }
+
   const resetServices = new Map<string, ReturnType<typeof createCodexRateLimitResetService>>();
   let resetServicesOwner = '';
   function getResetService(providerId?: string) {
@@ -292,14 +310,9 @@ export function registerMakerUsageIpc(maker: Maker): void {
     consumeResetCredit: async (params) => { assertScope(); const result = await maker.consumeAgentAccountRateLimitResetCredit('codex', params, providerId); assertScope(); return result; },
     readAccountIdentity: async () => {
       assertScope();
-      const state = await desktopCodexAuthAdapter.getState({ providerId });
+      const { email, accountId } = await readResetAccountIdentity(providerId);
       assertScope();
-      const accountId =
-        state.authSource === 'oauth' ? await desktopCodexAuthAdapter.getAccountId(providerId) : null;
-      const identity =
-        state.authSource === 'oauth' && state.identity?.includes('@') ? state.identity : null;
-      assertScope();
-      return { email: identity, accountId };
+      return { email: email?.includes('@') ? email : null, accountId };
     },
     recordRateLimitSnapshot: (snapshot) => scope === activeOwnerScopeKey() ? recordCodexAccountUsageSnapshot(snapshot, providerId) : Promise.resolve(),
   });
@@ -311,10 +324,9 @@ export function registerMakerUsageIpc(maker: Maker): void {
   async function accountKeyFor(providerId?: string): Promise<string> {
     const scope = activeOwnerScopeKey();
     const id = normalizeCodexUsageProvider(providerId);
-    const state = await desktopCodexAuthAdapter.getState({ providerId: id });
-    const accountId = state.authSource === 'oauth' ? await desktopCodexAuthAdapter.getAccountId(id) : null;
+    const { email, accountId } = await readResetAccountIdentity(id);
     if (scope !== activeOwnerScopeKey() || isAppSessionBoundaryPending()) throw new Error('Account scope changed');
-    return codexResetAccountKey(state.authSource === 'oauth' ? state.identity ?? null : null, accountId);
+    return codexResetAccountKey(email, accountId);
   }
 
   // Bind recovery confirmation to the exact owner, marker and OAuth credential observed before
@@ -324,7 +336,7 @@ export function registerMakerUsageIpc(maker: Maker): void {
     const scope = activeOwnerScopeKey();
     const accountKey = await accountKeyFor(providerId);
     const service = getResetService(providerId);
-    const result = providerId && providerId !== 'openai'
+    const result = (providerId && providerId !== 'openai') || usesNativeDefaultCodexAccount(providerId)
       ? await service.read()
       : await desktopCodexAuthAdapter.verifyRecoveryWithAccountRpc(() => service.read());
     if (scope !== activeOwnerScopeKey()) throw new Error('PRECONDITION_FAILED: Account scope changed');

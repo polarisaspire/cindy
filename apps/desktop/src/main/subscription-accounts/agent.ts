@@ -16,11 +16,13 @@ import {
 } from '../../shared/subscriptionAccounts.js';
 import {
   acquireSubscriptionAccount,
+  withDefaultCodexAccount,
   observeSubscriptionAccountUsage,
   type SubscriptionAccountLease,
 } from './runtime.js';
 import { readAccountBinding, readPool, writeAccountBindings, readLegacyCodexAccountId } from './store.js';
 import { registerSessionSubscriptionAccount } from './session.js';
+import { codexAccountRpc } from './nativeCli.js';
 
 function providerFor(
   agent: BaseAgent,
@@ -166,6 +168,20 @@ function guardAccountSwitch(
 export function withSubscriptionAccounts<T extends BaseAgent>(agent: T): T {
   return new Proxy(agent, {
     get(target, property) {
+      if (target.kind === 'codex' && property === 'readAccountRateLimits')
+        return async (providerId?: string) => {
+          const result = await withDefaultCodexAccount(
+            account => codexAccountRpc(account.configDir, 'account/rateLimits/read', {}), providerId,
+          );
+          return result === undefined ? target.readAccountRateLimits(providerId) : result;
+        };
+      if (target.kind === 'codex' && property === 'consumeAccountRateLimitResetCredit')
+        return async (...[params, providerId]: Parameters<BaseAgent['consumeAccountRateLimitResetCredit']>) => {
+          const result = await withDefaultCodexAccount(
+            account => codexAccountRpc(account.configDir, 'account/rateLimitResetCredit/consume', params), providerId,
+          );
+          return result === undefined ? target.consumeAccountRateLimitResetCredit(params, providerId) : result;
+        };
       if (property === 'refreshLocalModels')
         return async (options?: RefreshLocalModelsOptions) => {
           if (target.kind === 'pi') return target.refreshLocalModels(options);
