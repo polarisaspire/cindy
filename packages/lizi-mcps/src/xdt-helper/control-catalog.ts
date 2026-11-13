@@ -32,6 +32,7 @@ export const CONTROL_CATALOG: readonly Control[] = [
   helper('devices.remote-consent', 'devices', '远程控制授权请求', '请求同账号在线电脑弹出本机确认窗口，由用户开启持续有效的远程控制设置。', ['request_remote_control'], ['远程控制', '授权', '弹窗', 'remote control', 'consent'], '使用 list_machines 的精确设备 ID；只有目标电脑返回 enabled 才能继续原操作。拒绝、超时或旧版无响应不代表同意。'),
   setting('application.preferences', 'application', '语言、主题与通知', '发送快捷键、链接打开方式、动效、消息导航和首页偏好。', 'preferences', ['language', 'theme', 'notification', '语言', '主题', '通知', '快捷键', '动效', '链接'], false),
   setting('appearance.wallpaper', 'appearance', '字体与内置壁纸', '字体、字号、窗口缩放、内置壁纸及效果；自定义图片导入另查 appearance.assets。', 'appearance', ['wallpaper', 'font', '壁纸', '背景', '字体', '字号', '缩放']),
+  helper('appearance.themes', 'appearance', '导入主题包', '将 .cindy 主题包导入当前 Cindy 并刷新主题列表；同 ID 更新。切换与回读用 application.preferences。', ['import_theme_package'], ['theme', '主题', '导入主题', '安装主题', '主题包', 'cindy'], '仅本机任务；沿用当前任务的文件权限，不安装插件、不自动切换主题。'),
   setting('projects.git-safety', 'projects', 'Git 安全快照', 'Git 自动快照开关。', 'git-safety', ['git', '快照']),
   setting('tasks.goal-defaults', 'tasks', '目标模式默认限制', '以后启动目标模式的轮数、token 预算与无进展限制。', 'goal-defaults', ['goal', '目标模式', '预算']),
   setting('runtimes.resources', 'runtimes-and-storage', '运行资源', '命令并发、进程优先级、工具链线程。', 'agent-resources', ['resource', '并发', '资源', '线程']),
@@ -42,6 +43,8 @@ export const CONTROL_CATALOG: readonly Control[] = [
   helper('models.configuration', 'models', '模型与供应商配置', '本机 API 连接添加、安全密钥输入、型号发现与连接验证；型号参数、供应商启停及 Claude/Codex 多订阅账号。', ['list_model_providers', 'get_model_configuration', 'set_model_configuration', 'configure_model_provider', 'configure_model_connection'], ['model', 'provider', '模型', '供应商', '上下文', '压缩', '价格', '订阅', '账号', 'Claude', 'Codex', '负载均衡']),
   helper('models.default', 'models', '默认模型', '普通任务的新任务默认选择；伙伴调用时依其原默认模型语义。', ['get_app_default_model', 'set_app_default_model'], ['default model', '默认模型'], '单个伙伴覆盖请查 teammates.profile；不要把新任务默认和伙伴默认混为同一设置。'),
   helper('teammates.profile', 'teammates', '当前伙伴资料与模型', '修改当前调用任务绑定的伙伴资料和模型链。', ['get_teammate_state', 'update_teammate_profile'], ['teammate', 'companion', 'bot', '伙伴', '人设', '伙伴模型', '伙伴默认模型'], '仅绑定该伙伴的任务可用；不是任意 botId 管理接口。使用 expectedVersion；运行中切模遵循原安全边界。'),
+  helper('teammates.follow-up', 'teammates', '伙伴自动跟进本机任务', '让指定伙伴自动跟进本机全部普通任务；开启或暂停伙伴项目中的普通自动化。', ['get_teammate_follow_up', 'set_teammate_follow_up'], ['自动跟进', '接管', '全部任务', '本机任务', '巡查', 'follow-up', 'take over'], '全局巡查默认每 10 分钟，独立于逐任务接管。指定任务交给伙伴用 tasks.responsibility；登记任务不会恢复已暂停巡查。'),
+  helper('tasks.responsibility', 'teammates', '指定任务接管与负责伙伴', '登记、查询、转交、解除本机任务负责人及后续状态通知。', ['get_task_responsibility', 'set_task_responsibility', 'get_workbench', 'set_workbench_task_responsibility'], ['接管', '负责', '负责人', '登记', '工作台', '分配', '转交', '责任', 'takeover', 'responsibility'], '使用真实保存回执判断成功。每任务一位负责伙伴；转交须带当前 revision。通知只报告状态，不批准权限、不启动原任务、不恢复全局巡查。'),
   helper('teammates.capabilities', 'teammates', '伙伴能力与技能', '查询并选择当前伙伴的 Skill、MCP、工具和特性。', ['find_teammate_capabilities', 'set_teammate_capability', 'list_teammate_skills', 'read_teammate_skill', 'save_teammate_skill'], ['伙伴能力', '伙伴技能', 'capability']),
   helper('teammates.management', 'teammates', '伙伴创建与管理入口', '发现伙伴与主力电脑；创建及管理能力依当前身份。', ['create_teammate', 'list_agents', 'get_teammate_home', 'move_teammate_home'], ['创建伙伴', '主力电脑', '伙伴设置']),
   { key: 'automations.schedule', domain: 'automations', title: '自动化设置与运行', summary: '时间、时区、模型、脚本、位置、暂停与恢复。', aliases: ['automation', 'schedule', 'cron', '自动化', '定时', '时间'], server: 'cindy_scheduler', tools: ['schedule_list', 'schedule_get', 'schedule_update', 'schedule_create', 'schedule_pause', 'schedule_resume', 'schedule_run_now', 'schedule_list_models'], notes: 'intervalMs 非空时优先于 cronExpr；改时间需同时核对时区和 nextFireAt。保存不会立即运行；run_now 是独立动作。' },
@@ -56,7 +59,7 @@ export const CONTROL_CATALOG: readonly Control[] = [
   // Explicit gaps remain discoverable. Metadata must never imply a working mutation.
   ...[
     ['application.window', 'application', '窗口行为与开机启动', '唤醒、菜单栏、关闭窗口和激活点击', '窗口 开机 菜单栏 wake startup'],
-    ['appearance.assets', 'appearance', '自定义壁纸和主题导入', '自定义媒体与主题的导入管理', '自定义壁纸 壁纸图片 导入主题 custom wallpaper'],
+    ['appearance.assets', 'appearance', '自定义壁纸导入', '自定义壁纸媒体的导入管理；主题包见 appearance.themes', '自定义壁纸 壁纸图片 custom wallpaper'],
     ['groups.settings', 'groups-and-sharing', '群与共享设置', '群成员、分工、通知和共享权限', '群 共享 group sharing'],
     ['devices.remote-settings', 'devices', '远程控制与中转配置', '远控开关、中转服务和设备管理', '远程控制 中转 relay'],
     ['input.voice', 'media-and-input', '语音与输入设置', '麦克风、语言、词典、音效和配件', '语音 麦克风 词典 voice microphone'],
@@ -101,7 +104,7 @@ export function createControlReader(deps: Deps) {
     return { name, description: tool.description, ...(detail ? { inputSchema: z.toJSONSchema(z.strictObject(tool.inputShape)) } : {}) };
   }
   async function toolsFor(control: Control, detail: boolean, allowed: ReadonlySet<string>) {
-    if (deps.local?.() === false && (control.section || control.key === 'models.configuration' || control.key === 'runtimes.pi'))
+    if (deps.local?.() === false && (control.section || control.key === 'models.configuration' || control.key === 'runtimes.pi' || control.key === 'appearance.themes'))
       return { tools: [] as ToolInfo[], reason: 'requires_local_task' };
     if (!control.server) return { tools: [] as ToolInfo[], reason: 'not_exposed' };
     if (control.server === 'cindy_helper') {

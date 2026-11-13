@@ -25,7 +25,23 @@ import {
   captureTaskActionGuard,
   captureTaskActionDeliveryGuard,
   isTaskActionRevoked,
+  setTaskAssignmentInputValidator,
 } from '../taskActionAuthorization.js';
+
+it('revalidates restored assignment events and never uses their marker to restore consent', async () => {
+  const item = { ...input(), clientId: 'task-assignment-rev:event' };
+  let active = true;
+  setTaskAssignmentInputValidator(async () => { if (!active) throw new Error('ASSIGNMENT_REVOKED'); });
+  try {
+    await expect(taskActionInputGuard('partner', item)!()).resolves.toBeUndefined();
+    active = false;
+    await expect(taskActionInputGuard('partner', item)!()).rejects.toThrow('ASSIGNMENT_REVOKED');
+    expect(isTaskActionRevoked(new Error('ASSIGNMENT_REVOKED'))).toBe(true);
+    active = true;
+    item.taskActionRequiresAuthorization = true;
+    await expect(taskActionInputGuard('partner', item)!()).rejects.toThrow('TASK_ACTION_AUTHORIZATION_REQUIRED');
+  } finally { setTaskAssignmentInputValidator(undefined); }
+});
 
 function fixture(ownerInput = false, delegated = false) {
   let current = true;

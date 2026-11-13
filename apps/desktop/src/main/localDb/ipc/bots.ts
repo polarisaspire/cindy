@@ -311,7 +311,7 @@ export async function createBotCanonicalSession(
 }
 
 export type EnsureBotGroupLaneResult =
-  | { ok: true; sessionId: string; created: boolean }
+  | { ok: true; sessionId: string; created: boolean; replacedSessionId?: string }
   | { ok: false; errorCode: 'MEMBER_UNAVAILABLE' | 'NO_MODEL'; message: string };
 
 /**
@@ -328,6 +328,11 @@ export type EnsureBotGroupLaneResult =
  *
  * With `talkPlanId` (server groups only), the Bot's own lane for that queue: like a Thread
  * lane, it talks in the group lane's place with its own context; no project folder.
+ *
+ * With `projectDir` (the group's project folder on this computer), a V2 teammate's group and
+ * Thread lanes that answer its owner work in that folder instead of the Home workspace, like an
+ * ordinary task there (bot-group-chat.md §7.5). The lane follows the folder: one created
+ * elsewhere is archived and replaced.
  */
 export async function ensureBotGroupLaneSession(input: {
   botId: string;
@@ -338,6 +343,7 @@ export async function ensureBotGroupLaneSession(input: {
   threadRootId?: string;
   talkPlanId?: string;
   personalDigest?: boolean;
+  projectDir?: string;
 }): Promise<EnsureBotGroupLaneResult> {
   const owner = captureBotOperationOwner();
   const client = getDbClient();
@@ -350,7 +356,7 @@ export async function ensureBotGroupLaneSession(input: {
     : input.chatAccess && input.threadRootId ? chatGroupThreadRouteKey(input.groupId, input.chatAccess, input.threadRootId)
     : input.chatAccess ? chatGroupLaneRouteKey(input.groupId, input.chatAccess) : botGroupLaneRouteKey(input.groupId);
   const [existing] = await db
-    .select({ sessionId: botSessionLinks.sessionId })
+    .select({ sessionId: botSessionLinks.sessionId, workingDir: sessions.workingDir, projectDir: sessions.projectDir })
     .from(botSessionLinks)
     .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
     .where(and(
@@ -362,7 +368,15 @@ export async function ensureBotGroupLaneSession(input: {
       eq(sessions.status, 'active'),
     ))
     .limit(1);
-  if (existing) {
+  // An owner's group or Thread lane follows the group's project folder: it works there when the
+  // caller passes one, in the Home workspace otherwise.
+  const ownerReplyLane = !input.plan && !input.talkPlanId && !input.personalDigest
+    && input.chatAccess?.mode === 'owner' && !input.chatAccess.maskOwnerId;
+  const wantedProject = ownerReplyLane && input.projectDir && await readTeammateProjectMode(input.botId) ? input.projectDir : null;
+  const inProject = !!existing?.projectDir && existing.workingDir === existing.projectDir
+    && isGroupProjectLaneDir(owner.userDataDir, input.botId, existing.workingDir);
+  const moves = !!existing && ownerReplyLane && (wantedProject ? existing.workingDir !== wantedProject : inProject);
+  if (existing && !moves) {
     await syncBotLanePermission(existing.sessionId);
     owner.assertCurrent();
     return { ok: true, sessionId: existing.sessionId, created: false };
@@ -383,10 +397,10 @@ export async function ensureBotGroupLaneSession(input: {
   const config = parseJson(profileVersion.capabilitiesJson);
   const primaryRoute = (await readEffectiveBotModelChain(config))[0] ?? null;
   if (!primaryRoute) return { ok: false, errorCode: 'NO_MODEL', message: '伙伴还没有可用模型' };
-  const workspaceKind = input.plan && input.chatAccess?.mode !== 'chat' ? ('project' as const) : ('dialogue' as const);
+  const workspaceKind = (input.plan || wantedProject) && input.chatAccess?.mode !== 'chat' ? ('project' as const) : ('dialogue' as const);
   const workingDir = input.chatAccess?.mode === 'chat'
     ? await ensureBotChatOnlyWorkspaceDir(owner.userDataDir, input.botId, groupLaneOfRouteKey(routeKey))
-    : input.plan ? input.plan.workDir : await ensureBotWorkspaceDir(owner.userDataDir, input.botId, app.getPath('userData'));
+    : input.plan ? input.plan.workDir : wantedProject ?? await ensureBotWorkspaceDir(owner.userDataDir, input.botId, app.getPath('userData'));
   const now = Date.now();
   const sessionId = resolveBusinessSessionId(input.plan?.sessionId);
   const row = {
@@ -395,6 +409,7 @@ export async function ensureBotGroupLaneSession(input: {
       {
         workspaceKind,
         workingDir,
+        ...(wantedProject ? { projectDir: wantedProject } : {}),
         ...botSessionRouteFields(config, primaryRoute),
         remoteHostId: undefined,
         source: 'bot',
@@ -418,10 +433,12 @@ export async function ensureBotGroupLaneSession(input: {
     botId: input.botId,
     groupId: input.groupId,
     routeKey,
+    ...(moves ? { replaceOtherWorkingDir: true } : {}),
     session: {
       id: row.id,
       title: row.title,
       workingDir: row.workingDir ?? null,
+      ...(row.projectDir ? { projectDir: row.projectDir } : {}),
       workspaceKind: row.workspaceKind,
       model: row.model,
       effort: row.effort,
@@ -442,7 +459,16 @@ export async function ensureBotGroupLaneSession(input: {
     await syncBotLinkedLanePermissions(result.permissionRepairCanonicalSessionId);
     owner.assertCurrent();
   }
-  return { ok: true, sessionId: result.sessionId, created: result.created };
+  return { ok: true, sessionId: result.sessionId, created: result.created,
+    ...(result.replacedSessionId ? { replacedSessionId: result.replacedSessionId } : {}) };
+}
+
+/** A group lane recorded in a project folder rather than the teammate's own Home. */
+function isGroupProjectLaneDir(userDataDir: string, botId: string, workingDir: string | null): boolean {
+  if (!workingDir) return false;
+  const home = path.resolve(botProfileDir(userDataDir, botId));
+  const resolved = path.resolve(workingDir);
+  return resolved !== home && !resolved.startsWith(home + path.sep);
 }
 
 export type EnsureBotChannelLaneResult =
@@ -1813,7 +1839,7 @@ export async function recoverActiveTeammateInvitations(): Promise<void> {
     owner.assertCurrent();
     for (const { id } of profiles) queueBotInvitation(id);
   } catch (cause) {
-    log.warn('recover pending teammate invitations failed', {
+    log.warn('recover pending buddy invitations failed', {
       error: cause instanceof Error ? cause.name : typeof cause,
     });
   }
@@ -1827,7 +1853,7 @@ export async function setBotProfileAvatar(botId: string, image: { buffer: Buffer
   const db = client.drizzle;
     const [current] = await db.select().from(botProfiles).where(eq(botProfiles.id, botId)).limit(1);
     if (!current) throwIpcError('NOT_FOUND', 'Bot 不存在');
-    if (expectedVersion !== undefined && current.currentVersion !== expectedVersion) throwIpcError('PRECONDITION_FAILED', 'Teammate changed');
+    if (expectedVersion !== undefined && current.currentVersion !== expectedVersion) throwIpcError('PRECONDITION_FAILED', 'Buddy changed');
     if (current.status === 'archived') {
       throwIpcError('PRECONDITION_FAILED', '已停止的 Bot 不能修改头像');
     }
@@ -2018,7 +2044,7 @@ export async function createBotProfile(raw: unknown, restored?: RestoredBotOrigi
   try {
     await newTeammateSetup?.(id, creationOwnerBoundary.userDataDir, assertCreationOwnerStillCurrent);
   } catch (error) {
-    log.warn('new teammate V2 setup failed; retries on next start', { botId: id, error: String(error) });
+    log.warn('new buddy V2 setup failed; retries on next start', { botId: id, error: String(error) });
   }
   assertCreationOwnerStillCurrent();
   if (prepareInvitation) {
@@ -2330,7 +2356,7 @@ export async function updateBotProfile(raw: unknown, expectedVersion?: number,
       ownerRoot: owner.userDataDir,
       legacyUserDataDir: app.getPath('userData'),
     }).catch((error) => {
-      log.warn('teammate project preparation failed', { botId: id, error: String(error) });
+      log.warn('buddy project preparation failed', { botId: id, error: String(error) });
       return null;
     });
     owner.assertCurrent();
@@ -2338,7 +2364,7 @@ export async function updateBotProfile(raw: unknown, expectedVersion?: number,
     if (prepared) {
       const [route] = await readEffectiveBotModelChain(normalizedNextConfig).catch(() => []);
       await ensureBotProjectAutomations({ botId: id, displayName, workingDir: prepared.workingDir, route })
-        .catch((error) => log.warn('teammate project automations failed', { botId: id, error: String(error) }));
+        .catch((error) => log.warn('buddy project automations failed', { botId: id, error: String(error) }));
       owner.assertCurrent();
     }
   } else if (readBotProjectMode(normalizedNextConfig) && patch.displayName !== undefined

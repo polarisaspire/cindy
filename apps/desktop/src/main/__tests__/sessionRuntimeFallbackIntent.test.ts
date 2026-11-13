@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { transpileModule, ScriptTarget } from 'typescript';
+import { createSourceFile, forEachChild, isVariableDeclaration, transpileModule, ScriptTarget, type Node } from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { shouldPreserveRuntimeFallbackAutoResume } from '../maker-ipc/interruptedTurnAutoResume';
 import { createPendingAgentSwitchRegistry } from '../maker-ipc/sessionAgentSwitchHandler';
@@ -9,10 +9,18 @@ const guard = source.slice(
   source.indexOf('  const canApplyAutomaticRuntimeSelection ='),
   source.indexOf('  cancelPendingAgentSwitchHolder ='),
 );
-const fallback = source.slice(
-  source.indexOf('  const maybeApplySessionRuntimeFallback = async ('),
-  source.indexOf('  const sessionControlService = createSessionControlService({'),
-);
+// Execute only the production fallback declaration. An adjacent notification
+// initializer must not become part of this runtime-selection fixture.
+const ast = createSourceFile('register.ts', source, ScriptTarget.ES2022, true);
+let fallback = '';
+function visit(node: Node): void {
+  if (isVariableDeclaration(node) && node.name.getText(ast) === 'maybeApplySessionRuntimeFallback') {
+    fallback = `const ${node.getText(ast)};`;
+  }
+  forEachChild(node, visit);
+}
+visit(ast);
+if (!fallback) throw new Error('Session runtime fallback declaration missing');
 
 function harness() {
   const pending = createPendingAgentSwitchRegistry();
