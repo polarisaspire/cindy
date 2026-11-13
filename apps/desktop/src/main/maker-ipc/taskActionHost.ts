@@ -110,13 +110,15 @@ export function createDesktopTaskActionAuthorizer(deps: {
         const input = deps.input(sessionId);
         const scheduled = !caller.botId && caller.source !== 'bot' &&
           deps.getSession(sessionId)?.getCurrentTurnOrigin()?.kind === 'scheduler';
-        // User-authored ordinary work retains the existing Agent permission flow.
-        if (
+        const ordinaryTask =
           !caller.botId &&
           caller.source !== 'bot' &&
           caller.source !== 'scheduler' &&
-          !input.automatic && !scheduled
-        )
+          !input.automatic && !scheduled;
+        // Assignment persistence needs a revocable commit guard even for an
+        // ordinary task. Reuse its Agent permission flow, without prompting again.
+        // Other ordinary writes keep bare admission and their durable queue semantics.
+        if (ordinaryTask && !(call.server === 'cindy_helper' && call.tool === 'set_task_responsibility'))
           return null;
         if (caller.botId && (caller.botStatus !== 'active' || caller.archivedAt !== null))
           throw new Error('BOT_SESSION_INACTIVE');
@@ -139,7 +141,7 @@ export function createDesktopTaskActionAuthorizer(deps: {
           if (runtimePermissionApplies && permission?.isCurrent?.() !== true)
             throw new Error('TASK_ACTION_AUTHORIZATION_EXPIRED');
         };
-        const useRuntimePermissions = ownerInput || runtimePermissionApplies;
+        const useRuntimePermissions = ordinaryTask || ownerInput || runtimePermissionApplies;
         // Retain scheduled-review recovery only when no live runtime decision can
         // be reused. A current permission flow must never be reviewed twice.
         const runtime = !useRuntimePermissions && scheduled
