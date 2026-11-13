@@ -41,6 +41,7 @@ vi.mock('../../maker-host/claude-native-cli.desktop.js', () => ({
 import {
   codexAccountRpc,
   readNativeAccount,
+  readNativeAccountUsage,
   loginNativeAccount,
   readNativeCodexTokens,
   readNativeCodexAccountIdentity,
@@ -156,6 +157,17 @@ describe('official Codex profiles', () => {
     const requests = children[0].stdin.write.mock.calls.map(([line]) => JSON.parse(line));
     expect(requests.filter(r => r.method === method)).toHaveLength(1);
     expect(requests.some(r => r.method === 'account/read')).toBe(false);
+  });
+  // #10110 review, unit: legacy auth has no plan. Keep the plan returned by the
+  // selected profile's quota RPC; the old test fixtures only read account/read.
+  it('preserves the selected profile plan alongside its sanitized Codex quota', async () => {
+    h.accountResult = { rateLimits: { planType: 'pro', primary: {
+      usedPercent: 20, windowDurationMins: 300, resetsAt: Date.now() / 1000 + 3600,
+    } } };
+    expect(await readNativeAccountUsage('openai', '/fixture/legacy')).toMatchObject({
+      codexPlan: 'pro', codexUsage: { appServerBuckets: { __default__: { primary: { usedPercent: 20 } } } },
+    });
+    expect(h.spawn.mock.calls[0][2].env.CODEX_HOME).toBe('/fixture/legacy');
   });
   // Upgrade 2026-11-11, standard: a revoked imported login cannot be resurrected
   // by reading its still-present token file; successful reads keep the old native profile.
