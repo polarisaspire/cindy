@@ -1475,6 +1475,7 @@ import {
 import { SilentStopTurnLeaseGate, SessionTurnLeaseTracker } from './sessionTurnLease.js';
 import { ProductTurnUsageTargetTracker, ProductTurnWallClockTracker } from './turnWallClock.js';
 import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
+import { startTaskAssignmentEvents } from './taskAssignmentEvents.desktop.js';
 import {
   assertAgentCommandListIpcCaller,
   toAgentCommandListFailure,
@@ -12954,7 +12955,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (params.files?.length || params.forceQueue || verifiedOwnerRequestText(params.autoReviewUserText) !== undefined || explicitClientId?.startsWith('bot-dm:') || explicitClientId?.startsWith(BOT_GROUP_CLIENT_ID_PREFIX) || explicitClientId?.startsWith('bot-authorization-resume:') || inputCoordinator.shouldQueueNewTurn(targetSessionId) || agentSwitchPending.get(targetSessionId)) {
         lockStage = 'enqueue-queued-message';
         const qClientId = explicitClientId ?? createId();
-        const durableScriptDelivery = qClientId.startsWith('schedule-delivery:');
+        const durableScriptDelivery = qClientId.startsWith('schedule-delivery:') || qClientId.startsWith('task-assignment-');
         if (durableScriptDelivery) {
           await inputCoordinator.ensureQueueRestored(targetSessionId);
           const persisted = await getPersistedInputClientIds(targetSessionId, [qClientId]);
@@ -17715,6 +17716,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return { session: runtimeSession, outcome: 'failed' };
     }
   };
+
+  const assignmentIsland = getAgentIslandService();
+  if (assignmentIsland) startTaskAssignmentEvents({
+    subscribe: listener => assignmentIsland.subscribeSessionActivity(listener),
+    failed: () => log.warn('task assignment state notification deferred'),
+    send: async ({ sessionId, recipient, clientId, message, validate, assertCurrent }) => {
+      await validate();
+      const result = await sendToSessionInternal({ targetSessionId: recipient, clientId, message,
+        origin: { kind: 'session', senderSessionId: sessionId, displayText: message },
+        forceQueue: true, inheritTargetPlanMode: true, resumeWithStoredPermissionMode: true,
+        authorizationGuard: { validate, assertCurrent }, onAccepted: validate });
+      return result.ok;
+    },
+  });
 
   const sessionControlService = createSessionControlService({
     sessionExists: async (sessionId) => (await maker.getSessionMeta(sessionId)) !== null,

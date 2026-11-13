@@ -119,6 +119,8 @@ import { createDesktopTaskActionAuthorizer } from '../maker-ipc/taskActionHost.j
 import { authorizeGroupTool } from '../maker-ipc/botGroupToolAuthorization.js';
 import { createSharedTaskTools } from './sharedTaskTools.js';
 import { assertTaskActionCurrent } from '../maker-ipc/taskActionAuthorization.js';
+import { runTeammateFollowUpTool } from '../maker-ipc/teammateFollowUp.desktop.js';
+import { runTaskAssignmentTool } from '../maker-ipc/taskAssignments.desktop.js';
 import {
   getSessionRowSnapshot,
   patchSessionMetaInDb,
@@ -1290,6 +1292,8 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
       },
       // Linked projects of the calling teammate; the host derives the teammate from the caller session.
       teammateProjects: runBotProjectsTool,
+      teammateFollowUp: runTeammateFollowUpTool,
+      taskAssignments: runTaskAssignmentTool,
       skillhub: createSkillhubAgentTools({
         isCurrentSession: (context) => !!context.sessionId
           && deps.isCurrentLocalSessionInstance?.(context.sessionId, context.sessionInstanceId) === true,

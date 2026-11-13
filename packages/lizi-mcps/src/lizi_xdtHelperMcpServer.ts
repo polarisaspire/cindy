@@ -126,6 +126,9 @@ import { resolveLiziMcpSessionContext } from './session-context.js';
 import { logToolResultErrorCode } from './tool-error-telemetry.js';
 import { withToolCallAuthority, type ToolCallAuthorizer } from './tool-call-authority.js';
 import { errorPayload, okPayload } from './xdt-helper/_payload.js';
+import { retiredWorkbenchResult } from './xdt-helper/retired-workbench.js';
+import { registerTeammateFollowUpTools, type TeammateFollowUpCallback } from './xdt-helper/teammate_follow_up.js';
+import { registerTaskAssignmentTools, type TaskAssignmentCallback } from './xdt-helper/task_assignments.js';
 import {
   registerCreateTeammateTool,
   type CreateTeammateCallbacks,
@@ -233,6 +236,8 @@ export const HELPER_CATEGORY_DESCRIPTIONS: Record<(typeof CATEGORY_ENUM)[number]
   ].join(''),
   bots: [
     '伙伴：资料、能力、关联项目（list_teammate_projects / set_teammate_project，仅自身）、发现伙伴与主力电脑。',
+    '自动接管本机全部任务的跟进：get_teammate_follow_up / set_teammate_follow_up，复用伙伴项目自动化，可开启或暂停。',
+    '指定任务交给伙伴负责：get_task_responsibility / set_task_responsibility，真实保存负责关系并通知后续状态；旧 set_workbench_task_responsibility 接口兼容。登记不会开启已暂停的全局巡查。',
     '发现伙伴（list_agents，返回伙伴主对话的 session_id，发消息用 handoff 类的 send_to_session）与主力电脑（get_teammate_home / move_teammate_home）可跨电脑；',
     '其余本机。',
   ].join(''),
@@ -292,6 +297,10 @@ function registerListToolsEntry(
       }
       if (name) {
         const tool = registry.get(name);
+        if (!tool) {
+          const retired = retiredWorkbenchResult(name);
+          if (retired) return retired;
+        }
         if (!tool || tool.hidden || !toolAllowed(allowed, tool)) return errorPayload('CAPABILITY_NOT_AVAILABLE', '工具未注册或不属于当前任务。');
         return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, tool: {
           name: tool.name, description: tool.description, inputSchema: z.toJSONSchema(z.strictObject(tool.inputShape)),
@@ -381,7 +390,7 @@ function registerCallToolEntry(
           { sessionId: telemetry.getSessionId(), server: 'cindy_helper', tool: name, args },
           () => registry.call(name, args, extra?.signal),
         )
-        : errorPayload('UNKNOWN_TOOL', 'Unknown helper tool.', {
+        : retiredWorkbenchResult(name) ?? errorPayload('UNKNOWN_TOOL', 'Unknown helper tool.', {
             available: registry.list().filter((tool) => toolAllowed(allowed, tool)).map((tool) => tool.name),
           });
       // errorCode 遥测:UNKNOWN_TOOL / INVALID_ARGS / 业务 errorCode 返回给模型自纠
@@ -530,6 +539,8 @@ export interface XdtHelperMcpDeps {
   botSkills?: BotSkillCallbacks;
   /** The calling teammate's linked projects; the host resolves the teammate from the caller Session. */
   teammateProjects?: TeammateProjectsCallback;
+  teammateFollowUp?: TeammateFollowUpCallback;
+  taskAssignments?: TaskAssignmentCallback;
   appSettings?: AppSettingsCallbacks;
   piRuntime?: PiRuntimeCallbacks;
   modelSettings?: AppModelsCallbacks;
@@ -790,6 +801,11 @@ export function createXdtHelperMcpServer(
       projects: deps.teammateProjects,
     });
   }
+
+  if (deps.teammateFollowUp) registerTeammateFollowUpTools(registry,
+    () => resolveLiziMcpSessionContext(sessionCtx), deps.teammateFollowUp);
+  if (deps.taskAssignments) registerTaskAssignmentTools(registry,
+    () => resolveLiziMcpSessionContext(sessionCtx), deps.taskAssignments);
 
   if (deps.teammateHome) {
     registerTeammateHomeTools(registry, {

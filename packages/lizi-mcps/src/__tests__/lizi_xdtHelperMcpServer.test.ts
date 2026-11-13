@@ -45,6 +45,103 @@ function parsePayload(result: unknown): Record<string, unknown> {
 }
 
 describe("cindy_helper MCP server", () => {
+  // Real MCP wire: the old takeover name must reach a durable assignment callback, not the
+  // retired-tool fallback. Discovery is read-only and ordinary task authorization remains binding.
+  it('discovers and authorizes durable takeover through new and compatibility tools', async () => {
+    const execute = vi.fn(async () => ({ ok: true, assignments: [], scope: 'local' }));
+    let deny = false;
+    let surface: 'bot-main' | 'default' | 'restricted' = 'bot-main';
+    const server = createXdtHelperMcpServer({ taskAssignments: execute, resolveSurface: async () => surface,
+      authorizeCall: async () => deny ? { ok: false as const, errorCode: 'USER_CANCELLED', message: 'cancelled' } : { ok: true as const },
+    }, { agentKind: 'codex', workingDir: '/fixture', sessionId: 'partner-chat' });
+    const client = new Client({ name: 'takeover-test', version: '1' });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    try {
+      const search = parsePayload(await client.callTool({ name: 'list_tools', arguments: { query: '接管' } }));
+      expect(search.items).toEqual(expect.arrayContaining([expect.objectContaining({ key: 'tasks.responsibility', availability: 'available' })]));
+      expect(execute).not.toHaveBeenCalled();
+      const call = (name: string, args: Record<string, unknown>) => client.callTool({ name: 'call_tool', arguments: { name, args } });
+      expect(parsePayload(await call('set_workbench_task_responsibility', { session_id: 'target', responsible: true }))).toMatchObject({ ok: true });
+      expect(execute).toHaveBeenLastCalledWith({ callerSessionId: 'partner-chat', sessionId: 'target', responsible: true, ownOnly: true });
+      await call('set_task_responsibility', { session_id: 'target', bot_id: 'other', responsible: true, expected_revision: 'rev' });
+      expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({ botId: 'other', expectedRevision: 'rev' }));
+      deny = true;
+      expect(parsePayload(await call('set_workbench_task_responsibility', { session_id: 'target', responsible: false }))).toMatchObject({ errorCode: 'USER_CANCELLED' });
+      expect(execute).toHaveBeenCalledTimes(2);
+      surface = 'default'; deny = false;
+      expect(parsePayload(await call('get_task_responsibility', {}))).toMatchObject({ ok: true });
+      surface = 'restricted';
+      expect(parsePayload(await call('set_task_responsibility', { session_id: 'target', bot_id: 'other', responsible: true }))).toMatchObject({ ok: false });
+      expect(execute).toHaveBeenCalledTimes(3);
+    } finally { await client.close(); await server.close(); }
+  });
+  // Real MCP admission: expose the new automation path, bind live caller identity,
+  // and ensure a rejected write cannot reach the scheduler callback.
+  it('discovers local follow-up and preserves ordinary action authorization', async () => {
+    const execute = vi.fn(async () => ({ ok: true as const, enabled: false, schedule_id: null,
+      interval_minutes: 10, cron_expr: '*/10 * * * *', scope: 'local' as const }));
+    let reject = false;
+    const authorizeCall = vi.fn(async () => reject ? { ok: false as const, errorCode: 'USER_CANCELLED', message: 'cancelled' } : { ok: true as const });
+    const server = createXdtHelperMcpServer({ teammateFollowUp: execute, authorizeCall,
+      resolveSurface: async () => 'bot-main' }, { agentKind: 'codex', workingDir: '/fixture', sessionId: 'caller' });
+    const client = new Client({ name: 'follow-up-test', version: '1' });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    try {
+      const list = parsePayload(await client.callTool({ name: 'list_tools', arguments: { category: 'bots' } }));
+      expect(list.tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'set_teammate_follow_up' })]));
+      for (const query of ['接管全部任务', '让伙伴自动跟进本机全部任务', 'follow-up']) {
+        const search = parsePayload(await client.callTool({ name: 'list_tools', arguments: { query } }));
+        expect(search.items).toEqual(expect.arrayContaining([
+          expect.objectContaining({ key: 'teammates.follow-up', availability: 'available' }),
+        ]));
+      }
+      const detail = parsePayload(await client.callTool({ name: 'list_tools', arguments: { key: 'teammates.follow-up' } }));
+      expect(detail).toMatchObject({ control: { operations: expect.arrayContaining([
+        expect.objectContaining({ name: 'set_teammate_follow_up' }),
+      ]) } });
+      expect(execute).not.toHaveBeenCalled();
+      const call = (name: string, args = {}) => client.callTool({ name: 'call_tool', arguments: { name, args } });
+      await call('get_teammate_follow_up');
+      expect(execute).toHaveBeenLastCalledWith({ callerSessionId: 'caller' });
+      await call('set_teammate_follow_up', { enabled: true });
+      expect(execute).toHaveBeenLastCalledWith({ callerSessionId: 'caller', enabled: true });
+      reject = true;
+      expect(parsePayload(await call('set_teammate_follow_up', { enabled: false }))).toMatchObject({ errorCode: 'USER_CANCELLED' });
+      expect(execute).toHaveBeenCalledTimes(2);
+    } finally { await client.close(); await server.close(); }
+  });
+
+  // Unit, real MCP wire: V1 names survive in saved chats after V2 removes them.
+  // Existing unknown-tool cases do not distinguish removal from missing access.
+  // Minimal reproduction: discovering the old responsibility tool by name.
+  it('explains retired workbench tools without dispatching replacements', async () => {
+    const authorizeCall = vi.fn();
+    const server = createXdtHelperMcpServer({ authorizeCall }, {
+      agentKind: 'codex', workingDir: '/fixture', sessionId: 'current-task',
+    });
+    const client = new Client({ name: 'retired-workbench-test', version: '1' });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    try {
+      for (const name of ['get_workbench', 'read_workbench_task', 'continue_workbench_task', 'set_workbench_task_responsibility']) {
+        for (const entry of ['list_tools', 'call_tool']) {
+          const result = parsePayload(await client.callTool({ name: entry, arguments: { name } }));
+          expect(result).toMatchObject({ ok: false, errorCode: 'TOOL_REMOVED', data: { tool: name, retryable: false } });
+          if (name === 'set_workbench_task_responsibility') {
+            expect((result.data as { hint: string }).hint).toContain('这些操作不会变更任务负责人');
+          }
+        }
+      }
+      expect(authorizeCall).not.toHaveBeenCalled();
+      expect(parsePayload(await client.callTool({ name: 'list_tools', arguments: { name: 'not_a_real_tool' } })))
+        .toMatchObject({ errorCode: 'CAPABILITY_NOT_AVAILABLE' });
+      expect(parsePayload(await client.callTool({ name: 'call_tool', arguments: { name: 'not_a_real_tool' } })))
+        .toMatchObject({ errorCode: 'UNKNOWN_TOOL' });
+    } finally { await client.close(); await server.close(); }
+  });
+
   // Unit through real MCP wire. Shared-task mode requires an authoritative current
   // task, never a selected window or caller-supplied target. Existing control tests
   // did not cover invitation discovery, live context loss or transferable receipts.
@@ -1346,6 +1443,7 @@ it('keeps the control directory compact and reports gaps and invalid continuatio
     expect(JSON.stringify(root).length).toBeLessThan(2500);
     expect(await read({ key: 'mobile.preferences' })).toMatchObject({ control: { availability: 'not_exposed', operations: [] } });
     expect(await read({ key: 'teammates.profile' })).toMatchObject({ control: { availability: 'unavailable_in_context', operations: [] } });
+    expect(await read({ key: 'teammates.follow-up' })).toMatchObject({ control: { availability: 'unavailable_in_context', operations: [] } });
     expect(await read({ key: 'native.set_current_session_title' })).toMatchObject({ control: { operations: [expect.objectContaining({ name: 'set_current_session_title' })] } });
     expect(rename).not.toHaveBeenCalled();
     expect(await read({ key: 'missing' })).toMatchObject({ ok: false, errorCode: 'UNKNOWN_CONTROL' });
