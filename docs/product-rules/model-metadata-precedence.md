@@ -178,7 +178,8 @@ Pi 已识别的 OpenAI 订阅连接之间可复用同一运行时：每个账号
 | 来源/字段 | 缺失或尚无有效发现 | 明确空数组或未返回型号 |
 | --- | --- | --- |
 | OpenAI / Anthropic 订阅根 | 尚无账号清单时名单为空（未登录、或登录后主动读取尚未完成） | 成员只取账号返回的型号；Registry 只补资料、标退役，不补入未返回的型号。Claude SDK 以系列简称返回的当前型号，按说明里的版本生成精确 ID（Registry 未登记也显示），读不出版本才不显示 |
-| 通用 OAuth additions-only、自定义连接刷新 | 保留已有配置 | 只新增/更新，不因本次未返回而删除已有成员 |
+| 通用 OAuth 授权后的 additions-only 发现 | 保留已有配置 | 只新增/更新，不因本次未返回而删除已有成员 |
+| 自定义连接的「刷新模型」 | 获取失败保留该 runtime 原名单 | 成功完整响应决定该 runtime 名单；未返回的型号移除，成功空数组清空；仍在名单内的型号保留用户显式参数与显示开关，不补公共参考型号 |
 | xAI 订阅账号权威发现 | null 或空数组表示尚无可用账号快照，走既有静态声明 + Registry 兼容路径（未绑定账号发现时唯一的名单来源） | 非空快照即账号成员，Registry 不再补入未返回的型号；不能套 additions-only 规则。Pi 同时使用该账号发现及公共声明 |
 | `providers[].models.pi` | 字段缺失才使用随包声明 | 显式 [] 不回填；非空声明允许账号发现补新型号，退役项不复活 |
 | 内置非 Gateway 的媒体数组 | 字段缺失、允许 Registry 派生时才由媒体 routes 补成员 | 显式 [] 不由 Registry 或发现结果复活；非空列表不由 Registry 增补成员，后续账号发现按下一行处理 |
@@ -190,6 +191,8 @@ Pi 已识别的 OpenAI 订阅连接之间可复用同一运行时：每个账号
 实现入口：[活动目录](../../apps/desktop/src/main/maker-host/active-catalog.ts)、
 [媒体投影](../../packages/model-providers/src/providerMediaModels.ts)、
 [自定义发现合并](../../packages/model-providers/src/modelMetadataLayers.ts)。
+手动刷新使用 [syncDiscoveredCustomProviderModels](../../apps/desktop/src/renderer/lib/customProviders.ts)，
+三引擎、成功空名单和失败保留回归见 [ProvidersSection 测试](../../apps/desktop/src/renderer/__tests__/providersSectionUnavailableModels.test.tsx)。
 
 ## 用户文件与恢复默认
 

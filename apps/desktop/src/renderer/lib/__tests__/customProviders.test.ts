@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { customProviderSecretStorageKey } from '@/../shared/providerSecrets';
 
 import {
-  appendDiscoveredCustomProviderModels,
+  syncDiscoveredCustomProviderModels,
   createCustomProvider,
   customProviderModelConfigFromCatalogModel,
   customProviderWireProtocolForSave,
@@ -747,8 +747,23 @@ describe('providerViewToCustomProviderConfig', () => {
   });
 });
 
-describe('appendDiscoveredCustomProviderModels', () => {
-  it('repairs confirmed OpenRouter discovery wrappers while preserving explicit model fields and manual IDs', () => {
+describe('syncDiscoveredCustomProviderModels', () => {
+  // Regression: Magpie removed models stayed selectable after a successful refresh.
+  // Existing cases only covered additions. Unit: a saved stale ID plus a complete
+  // response (including []) must produce exactly the returned membership.
+  it.each([false, true])('synchronizes successful discovery (empty=%s)', empty => {
+    const existing = [
+      { id: 'stale', name: 'Old model' },
+      { id: 'kept', name: 'My name', contextWindow: 64000, defaultEnabled: false },
+    ];
+    const result = syncDiscoveredCustomProviderModels(existing, empty ? [] : [
+      { id: 'kept', name: 'Upstream name' }, { id: 'new', name: 'New' },
+    ]);
+    expect(result.models.map(model => model.id).sort()).toEqual(empty ? [] : ['kept', 'new']);
+    if (!empty) expect(result.models.find(model => model.id === 'kept')).toMatchObject(existing[1]);
+    expect(existing).toHaveLength(2);
+  });
+  it('repairs confirmed OpenRouter discovery wrappers without guessing manual aliases', () => {
     const existing = [
       { id: 'anthropic/openai/new[1m]', name: 'Wrong wrapper', discoveredMetadata: {}, contextWindow: 64000 },
       { id: 'openai/new', name: 'Current', discoveredMetadata: {}, defaultEnabled: false },
@@ -756,18 +771,18 @@ describe('appendDiscoveredCustomProviderModels', () => {
     ];
     const discovered = [{ id: 'openai/new', name: 'Official', discoveredMetadata: { contextWindow: 128000 } },
       { id: 'manual/id', name: 'Other model' }];
-    const result = appendDiscoveredCustomProviderModels(existing, discovered, 'https://openrouter.ai/api/v1/models');
+    const result = syncDiscoveredCustomProviderModels(existing, discovered, 'https://openrouter.ai/api/v1/models');
     expect(result.models.map(model => model.id)).not.toContain('anthropic/openai/new[1m]');
     expect(result.models.find(model => model.id === 'openai/new'))
       .toMatchObject({ contextWindow: 64000, defaultEnabled: false });
-    expect(result.models.find(model => model.id === 'anthropic/manual/id'))
-      .toMatchObject({ name: 'Manual', nameExplicit: true });
-    expect(appendDiscoveredCustomProviderModels(existing, discovered, 'https://proxy.example/v1/models').models)
-      .toContainEqual(expect.objectContaining({ id: 'anthropic/openai/new[1m]' }));
+    expect(result.models.find(model => model.id === 'anthropic/manual/id')).toBeUndefined();
+    expect(result.models.find(model => model.id === 'manual/id')?.name).toBe('Other model');
+    expect(syncDiscoveredCustomProviderModels(existing, discovered, 'https://proxy.example/v1/models').models)
+      .not.toContainEqual(expect.objectContaining({ id: 'anthropic/openai/new[1m]' }));
     expect(existing[0].id).toBe('anthropic/openai/new[1m]');
   });
   it('puts new models first without overriding native-engine defaults', () => {
-    const result = appendDiscoveredCustomProviderModels(
+    const result = syncDiscoveredCustomProviderModels(
       [{ id: 'kept', name: 'Kept' }],
       [
         { id: 'kept', name: 'New name' },
@@ -786,7 +801,7 @@ describe('appendDiscoveredCustomProviderModels', () => {
   });
 
   it('carries the endpoint-declared contextWindow into appended models (#386)', () => {
-    const result = appendDiscoveredCustomProviderModels(
+    const result = syncDiscoveredCustomProviderModels(
       [],
       [
         { id: 'big', name: 'Big', contextWindow: 1_000_000 },

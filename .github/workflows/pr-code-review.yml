@@ -64,7 +64,9 @@ jobs:
       github.event.pull_request &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]'
+      github.actor != 'dependabot[bot]' &&
+      !(github.repository == 'polarisaspire/cindy' && github.event.pull_request.number == 14)
+    # #14 同样由维护者要求自行审阅；只对这个 fork PR 跳过外部代理。
     # 跨 org 复用 workflow,按本仓惯例钉死 commit SHA 而不是 @v1 浮动 tag:
     # tag 可被上游重新指向,而这份 workflow 持有 pull-requests:write 并决定
     # 喂给模型的 prompt。dependabot(github-actions 生态,见 .github/dependabot.yml)
