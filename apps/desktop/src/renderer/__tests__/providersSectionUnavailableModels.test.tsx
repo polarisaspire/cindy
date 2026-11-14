@@ -287,49 +287,87 @@ describe('ProvidersSection — 双栏管理', () => {
     expect(row.querySelector('path[fill^="url"]')?.getAttribute('fill')).toBe(`url(#${gradient!.id})`);
   });
 
-  it('batches a saved Hinoki refresh before waiting and preserves manual models', async () => {
-    const preset = BUNDLED_CATALOG.presets!.find(p => p.id === 'hinoki')!;
-    const config: CustomProviderConfig = {
-      id: 'saved-hinoki', name: 'Saved Hinoki', runtimes: structuredClone(preset.runtimes),
-    };
-    config.runtimes.codex!.models.push({
-      id: 'manual-model', name: 'My model', contextWindow: 64000, defaultEnabled: false,
-    });
-    const provider = buildUserProvider(config, { presets: [preset] });
-    providerSnapshotState.customOverride = { ...provider, connected: true };
-    providerSnapshotState.order = [provider.id, 'xd'];
-    window.electronAPI.safeStorageRead = vi.fn(async () => 'fake-hinoki-key');
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const fetchModels = vi.fn(async () => {
-      await gate;
-      return { ok: true, models: [{ id: 'new-model', name: 'New model' }] };
-    });
-    window.electronAPI.maker.fetchProviderModels = fetchModels;
-    render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
-    await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.models.refreshAria' }));
-    });
-    try {
-      await waitFor(() => expect(fetchModels).toHaveBeenCalledTimes(3));
-      expect(window.electronAPI.safeStorageRead).toHaveBeenCalledTimes(3);
-      expect(updateCustomProvider).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => { release(); });
-    }
-    await waitFor(() => expect(updateCustomProvider).toHaveBeenCalledOnce());
-    const saved = vi.mocked(updateCustomProvider).mock.lastCall![0];
-    expect(saved.runtimes.codex!.models).toContainEqual(config.runtimes.codex!.models.find(m => m.id === 'manual-model'));
-    for (const agent of provider.agents) {
-      expect(saved.runtimes[agent]!.models.find(m => m.id === 'new-model')).toEqual({
-        id: 'new-model', name: 'New model', discoveredMetadata: { name: 'New model' }, discoveredSource: undefined,
+  // PR #14 / unit: the real refresh button must keep Hinoki's concurrent reads,
+  // but a complete response now owns membership. The old batching case asserted
+  // additions-only retention and missed empty and failed batch results. A saved
+  // manual ID absent from the response distinguishes removal from failure safety.
+  it.each(['models', 'empty', 'partial-failure', 'failed'] as const)(
+    'batches a saved Hinoki refresh and synchronizes only successful runtimes: %s', async outcome => {
+      const preset = BUNDLED_CATALOG.presets!.find(p => p.id === 'hinoki')!;
+      const config: CustomProviderConfig = {
+        id: 'saved-hinoki', name: 'Saved Hinoki', runtimes: structuredClone(preset.runtimes),
+      };
+      const retained = { id: 'kept-model', name: 'My model', contextWindow: 64000, defaultEnabled: false };
+      for (const runtime of Object.values(config.runtimes)) runtime.models.push(
+        { id: 'manual-model', name: 'Absent manual model' }, retained,
+      );
+      const provider = buildUserProvider(config, { presets: [preset] });
+      providerSnapshotState.customOverride = { ...provider, connected: true };
+      providerSnapshotState.order = [provider.id, 'xd'];
+      window.electronAPI.safeStorageRead = vi.fn(async () => 'fake-hinoki-key');
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const fetchModels = vi.fn(async (request: { agent: string }) => {
+        await gate;
+        if (outcome === 'failed' || (outcome === 'partial-failure' && request.agent === 'codex')) {
+          return { ok: false, status: 503 };
+        }
+        return { ok: true, models: outcome === 'empty' ? [] : [
+          { id: 'new-model', name: 'New model' }, { id: retained.id, name: 'Upstream name' },
+        ] };
       });
-      expect(fetchModels).toHaveBeenCalledWith(expect.objectContaining({
-        agent, apiKey: 'fake-hinoki-key', savedProviderId: provider.id,
-      }));
-    }
-    expect(refetchProvidersSpy).toHaveBeenCalledOnce();
-  });
+      window.electronAPI.maker.fetchProviderModels = fetchModels;
+      render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.models.refreshAria' }));
+      });
+      try {
+        await waitFor(() => expect(fetchModels).toHaveBeenCalledTimes(3));
+        expect(window.electronAPI.safeStorageRead).toHaveBeenCalledTimes(3);
+        expect(updateCustomProvider).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => { release(); });
+      }
+      for (const agent of provider.agents) {
+        expect(fetchModels).toHaveBeenCalledWith(expect.objectContaining({
+          agent, apiKey: 'fake-hinoki-key', savedProviderId: provider.id, allowEmpty: true,
+        }));
+      }
+      if (outcome === 'failed') {
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('settings.providers.models.refreshFailed'));
+        expect(updateCustomProvider).not.toHaveBeenCalled();
+        expect(toast.success).not.toHaveBeenCalled();
+        expect(refetchProvidersSpy).not.toHaveBeenCalled();
+        return;
+      }
+      await waitFor(() => expect(updateCustomProvider).toHaveBeenCalledOnce());
+      const saved = vi.mocked(updateCustomProvider).mock.lastCall![0];
+      for (const agent of provider.agents) {
+        const models = saved.runtimes[agent]!.models;
+        if (outcome === 'partial-failure' && agent === 'codex') {
+          expect(models).toEqual(config.runtimes[agent]!.models);
+        } else {
+          expect(models.map(model => model.id).sort()).toEqual(outcome === 'empty' ? [] : ['kept-model', 'new-model']);
+          if (outcome !== 'empty') {
+            expect(models.find(model => model.id === retained.id)).toMatchObject(retained);
+            expect(models.find(model => model.id === 'new-model')).toEqual({
+              id: 'new-model', name: 'New model', discoveredMetadata: { name: 'New model' }, discoveredSource: undefined,
+            });
+          }
+        }
+      }
+      expect(vi.mocked(updateCustomProvider).mock.lastCall![2]).toEqual({ source: 'manual-settings' });
+      if (outcome === 'partial-failure') {
+        expect(toast.error).toHaveBeenCalledWith('settings.providers.models.refreshFailed');
+        expect(toast.success).not.toHaveBeenCalled();
+      } else {
+        expect(toast.error).not.toHaveBeenCalled();
+        expect(toast.success).toHaveBeenCalledWith(outcome === 'empty'
+          ? 'settings.providers.models.refreshDone' : 'settings.providers.models.refreshAdded');
+      }
+      expect(refetchProvidersSpy).toHaveBeenCalledOnce();
+    },
+  );
   // Renderer unit: click the real provider refresh/menu, inspect the persisted
   // config and visible dialog. Earlier refresh cases only used chat-only proxies;
   // a MiniMax API connection with no speech is the minimal missing-default case.
