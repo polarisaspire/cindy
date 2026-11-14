@@ -25,6 +25,25 @@ import { useTeammateRoster } from '@/session/useTeammateRoster';
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root | undefined;
 let result: ReturnType<typeof useTeammateRoster>;
+
+// Unit regression: account-only roster bindings used to retain the previous relay's
+// hosts after a route switch, including when the new route could not answer.
+it('drops the previous relay hosts when the same account switches to an unreachable route', async () => {
+  const { setActiveSelfHostedRelay, __testing } = await import('@/device-link/selfHostedRelayRouting');
+  await render();
+  expect(result.targets.map(host => host.deviceId)).toEqual(['old', 'new']);
+  h.link.status = 'offline';
+  try {
+    await act(async () => setActiveSelfHostedRelay({ relayId: 'test-relay', name: 'Test',
+      baseUrl: 'https://relay.unit.invalid', credential: 'fake-test-credential', signing: null }));
+    await render();
+    expect(result.targets).toEqual([]);
+    expect(result.items).toEqual([]);
+    expect(h.auth.accountGeneration).toBe(1);
+  } finally {
+    await act(async () => __testing.reset());
+  }
+});
 function Probe({ enabled = true }: { enabled?: boolean }) { result = useTeammateRoster(enabled); return null; }
 async function render(enabled = true) { root ??= createRoot(document.createElement('div')); await act(async () => root!.render(createElement(Probe, { enabled }))); }
 beforeEach(() => {
@@ -219,8 +238,8 @@ it('retains in-memory teammates if the disk capability read stalls', async () =>
   const cached = { key: 'old:bot', host: { deviceId: 'old', deviceName: 'Old' }, item: {
     ref: { collectionId: 'teammates', kind: 'bot', id: 'bot' }, revision: '1', display: { title: 'Cached' }, links: [],
   } };
-  readRemoteCollectionCache('owner:1', 'teammates');
-  writeRemoteCollectionCache('owner:1', 'teammates', [cached]);
+  readRemoteCollectionCache(JSON.stringify(['owner', 1, 'official']), 'teammates');
+  writeRemoteCollectionCache(JSON.stringify(['owner', 1, 'official']), 'teammates', [cached]);
   h.list.items = [cached];
   h.snapshot.mockReturnValue(new Promise(() => {}));
   h.link.readDeviceList.mockReturnValue(new Promise(() => {}));

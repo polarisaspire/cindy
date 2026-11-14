@@ -96,6 +96,9 @@ jobs:
           pnpm --filter desktop exec tsc --project ../../scripts/device-link/tsconfig.json
           pnpm test:device-link
 
+      - name: Verify self-hosted relay interoperability
+        run: pnpm --filter @cindy/device-link-relay run interop
+
       # DS-7: candidate merge/head versus the event base; only mature colour
       # consumers block. Geometry/adoption observations remain report-only.
       - name: Check added design colours
@@ -199,19 +202,25 @@ jobs:
         run: pnpm install:ripgrep
 
       - name: Install Linux user-installer test tools
+        timeout-minutes: 5
         # Native canvas badge tests need a real bold sans-serif font. The runner
         # image only promises emoji fonts; keep this prerequisite explicit.
         run: |
-          # Ubuntu's archive hostnames have repeatedly failed DNS on runners.
-          # Use the Kernel Archives' Ubuntu mirror without changing Ubuntu's
-          # archive signing keys or the image's security fallback.
+          # Keep Ubuntu's package signature checks and use official mirrors that
+          # respond when mirrors.kernel.org stalls during TLS negotiation.
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i -e '/azure\.archive\.ubuntu\.com/d' \
-              -e 's|https://archive\.ubuntu\.com/ubuntu/|https://mirrors.kernel.org/ubuntu/|' \
-              /etc/apt/apt-mirrors.txt
+            printf '%s\n' \
+              'https://security.ubuntu.com/ubuntu/' \
+              'https://archive.ubuntu.com/ubuntu/' |
+              sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           fi
-          sudo apt-get update
-          sudo apt-get install --yes libarchive-tools binutils desktop-file-utils xdg-utils fontconfig fonts-dejavu-core
+          apt_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=20
+            -o Acquire::https::Timeout=20
+          )
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install --yes libarchive-tools binutils desktop-file-utils xdg-utils fontconfig fonts-dejavu-core
           fc-match 'sans-serif:style=Bold'
 
       - name: Run client and package unit test shard
@@ -490,4 +499,3 @@ jobs:
 
       - name: Run Desktop Git integration tests
         run: pnpm test:git-integration
-

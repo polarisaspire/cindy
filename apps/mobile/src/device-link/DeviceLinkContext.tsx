@@ -205,7 +205,7 @@ import { meterDeviceLinkInvokes, recordDeviceLinkPush } from '@/debug/deviceLink
 import { decodeGzipBase64TextBounded } from '@/utils/gzipBase64';
 import { gunzipBase64OffThread } from '@/utils/gunzipOffThread';
 import { createLowPriorityReadGate, isLowPriorityRead, type LowPriorityReadGate } from './lowPriorityReadGate';
-import { invokeMetricLabel, jankMetricsEnabled, recordInvokeSent, recordInvokeTransfer, recordPushHandled } from '@/debug/jankMetrics';
+import { invokeMetricLabel, jankMetricsEnabled, recordInvokeSent, recordInvokeTransfer, recordPresenceUpdate, recordPushHandled } from '@/debug/jankMetrics';
 import { localNetworkStore, type NetworkState } from '@/device-link/localNetworkStatus';
 
 export interface DeviceLinkConnectionState {
@@ -253,6 +253,11 @@ export interface DeviceLinkContextValue {
   closeLink(deviceId: string): void;
   /** Acquire before background grace ends; always release on settlement/cancellation. Hard deadline enforced by lifecycle. */
   beginBackgroundTransition?(): () => void;
+  /**
+   * Keep (or bring back) the relay connection while the app is in the background, for one
+   * bounded action the person took from a notification. Returns the release; always call it.
+   */
+  holdBackgroundConnection?(): () => void;
   /**
    * opts.preSend:在连接就绪并从 invoke 队列出队后、实际发送前的同步检查点。抛错即
    * 中止本次发送(错误原样上抛)。供写序敏感的调用方(patchHomeSession 的 isLatest
@@ -544,6 +549,21 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       settle();
     };
   }, []);
+  const backgroundConnectionRef = useRef<ReturnType<typeof createBackgroundConnection> | null>(null);
+  // Counted here, not on one connection: a press can arrive before sign-in has restored the
+  // client, and the client can be replaced while the press is being carried out.
+  const backgroundHoldsRef = useRef(0);
+  const holdBackgroundConnection = useCallback(() => {
+    backgroundHoldsRef.current += 1;
+    backgroundConnectionRef.current?.held();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      backgroundHoldsRef.current -= 1;
+      if (backgroundHoldsRef.current === 0) backgroundConnectionRef.current?.unheld();
+    };
+  }, []);
   // 每次后台释放都翻代。subscribe 即使跨 background→active 才收到 ACK,也只能在
   // 发起代仍为当前代时登记远端 ACK,避免迟到成功覆盖较新的 unsubscribe。
   const backgroundReleaseGenerationRef = useRef(0);
@@ -599,6 +619,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     const pending = rosterRequestRef.current;
     if (!options.fresh && pending?.client === client && pending.epoch === epoch) return pending.promise;
     const generation = ++rosterRequestGenerationRef.current;
+    const routeAtStart = getSelfHostedRelayRouteGeneration();
     const presenceEpochAtStart = presenceAvailabilityEpochsRef.current.next;
     const apply = rosterConsumerRef.current?.();
     const owner = auth.accountGeneration;
@@ -610,6 +631,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     }, 'device-directory', () => auth.apiFetch<{ devices: DeviceView[] }>('/api/device-link/devices', {
       baseUrl: DEVICE_LINK_API_BASE_URL, timeoutMs: 12_000,
     })).then((snapshot) => {
+      if (routeAtStart !== getSelfHostedRelayRouteGeneration()) throw new Error('Device list route superseded');
       const rawDevices = snapshot.value.devices;
       const result = { devices: rawDevices.map(device => {
         const deviceId = device.deviceId;
@@ -657,7 +679,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       if (rosterRequestRef.current?.promise === promise) rosterRequestRef.current = null;
     }).catch(() => undefined);
     return promise;
-  }, [auth.apiFetch, auth.accountGeneration, rosterContinuity]);
+  }, [auth.apiFetch, auth.accountGeneration, rosterContinuity, relayRouteGeneration]);
 
   const clearPerAccountDeviceLinkState = useCallback(() => {
     rosterGenerationRef.current += 1;
@@ -680,6 +702,16 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     setPresenceVersion((version) => version + 1);
     setRosterVersion((version) => version + 1);
   }, [rosterContinuity]);
+
+  const dataRelayGenerationRef = useRef(relayRouteGeneration);
+  useLayoutEffect(() => {
+    if (dataRelayGenerationRef.current === relayRouteGeneration) return;
+    dataRelayGenerationRef.current = relayRouteGeneration;
+    // Retire old-route reads and mirrors before the new route can paint them.
+    rosterRequestGenerationRef.current += 1;
+    rosterRequestRef.current = null;
+    clearPerAccountDeviceLinkState();
+  }, [relayRouteGeneration, clearPerAccountDeviceLinkState]);
 
   /**
    * availability 放在 ref 里供 transport 同步读取；每次真实的三态变化也必须发布给
@@ -1506,6 +1538,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       // presence 变化代表目标链路代际变化(offline / remote-disabled / 恢复都一样):
       // 上一代成功 link 不能跨代复用,下一次请求必须重新 link-open 确认。
       if (!retained || explicitControlOff) openLinkInFlightRef.current.delete(snap.deviceId);
+      recordPresenceUpdate();
       setLastPresenceSnapshot(effectiveSnap);
       setPresenceVersion((n) => n + 1);
       const presence = updatePresenceAvailability(
@@ -1792,7 +1825,9 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       releaseTopics: releaseHeavyTopics,
       pendingTransitions: () => [...backgroundTransitions.current],
       stop: () => client.stop(),
-      connect: () => client.connectAllNow('appstate-active', {
+      isHeld: () => backgroundHoldsRef.current > 0,
+      // A tapped notification action is an explicit request too: it may leave the cooldown.
+      connect: (reason) => client.connectAllNow(reason === 'hold' ? 'notification-action' : 'appstate-active', {
         overrideCongestionCooldown: true,
         keepInFlightAttempt: true,
       }),
@@ -1801,6 +1836,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       suspendMs: BACKGROUND_SUSPEND_SUSPECT_MS,
       report: (event) => mobileDebugLog('debug', 'device-link', 'background lifecycle', event),
     });
+    backgroundConnectionRef.current = backgroundConnection;
     if (AppState.currentState) noteAppLifecycleState(AppState.currentState);
     let refreshNetworkState = () => {};
     const sub = AppState.addEventListener('change', (next) => {
@@ -1833,22 +1869,27 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
           }
         }
       }
-      if (next === 'background') {
-        diagnostics.background();
-        backgroundReleaseInFlightRef.current = true;
-        backgroundReleaseGenerationRef.current += 1;
-        suspendRemoteProjectAliases();
-        // App 生命周期暂停全部恢复执行，但各 peer 状态仍彼此独立；回前台统一
-        // 重新排队，旧代请求的迟到结果不会创建重试。
-        peerRecoverySchedulerRef.current?.pause();
-        // 立即释放重量级 session:<id> 订阅(趁 socket 还活着、iOS 尚未挂起 JS):
-        // 被控桌面以「有人订阅该会话流」为防打扰信号压制手机系统推送,锁屏/切后台
-        // 后若订阅残留(宽限窗、挂起延迟最长可拖到 server 60s 空闲清扫),恰好在
-        // 用户离开的瞬间完成的任务就永远收不到通知。只动远端订阅与 ack 簿记,
-        // registry 所有权保留 —— 回前台的 rehydrate 会因 ack 已清而重新订阅。
-        backgroundConnection.background();
-      }
+      if (next === 'background') enterBackground();
     });
+    function enterBackground() {
+      diagnostics.background();
+      backgroundReleaseInFlightRef.current = true;
+      backgroundReleaseGenerationRef.current += 1;
+      suspendRemoteProjectAliases();
+      // App 生命周期暂停全部恢复执行，但各 peer 状态仍彼此独立；回前台统一
+      // 重新排队，旧代请求的迟到结果不会创建重试。
+      peerRecoverySchedulerRef.current?.pause();
+      // 立即释放重量级 session:<id> 订阅(趁 socket 还活着、iOS 尚未挂起 JS):
+      // 被控桌面以「有人订阅该会话流」为防打扰信号压制手机系统推送,锁屏/切后台
+      // 后若订阅残留(宽限窗、挂起延迟最长可拖到 server 60s 空闲清扫),恰好在
+      // 用户离开的瞬间完成的任务就永远收不到通知。只动远端订阅与 ack 簿记,
+      // registry 所有权保留 —— 回前台的 rehydrate 会因 ack 已清而重新订阅。
+      backgroundConnection.background();
+    }
+    // 通知按钮会让 App 直接在后台启动,这时不会再收到「进入后台」事件。照后台处理:不订阅、
+    // 不恢复，宽限后断开(有按钮操作在进行时由它保持到做完)，否则连接会一直留在后台，
+    // 电脑还会以为手机在看任务而压掉推送。回到前台时由上面的 active 分支照常恢复。
+    if (AppState.currentState === 'background') enterBackground();
 
     // Loaded inside the authenticated lifecycle; old native builds keep their
     // existing heartbeat fallback if the optional runtime module is unavailable.
@@ -1911,6 +1952,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       networkSubscription?.remove();
       localNetworkStore.update();
       sub.remove();
+      if (backgroundConnectionRef.current === backgroundConnection) backgroundConnectionRef.current = null;
       backgroundConnection.dispose();
       backgroundTransitions.current.clear();
       offUnresponsive();
@@ -2101,6 +2143,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<DeviceLinkContextValue>(() => ({
     beginBackgroundTransition,
+    holdBackgroundConnection,
     status,
     sharedTaskAvailable,
     sharedTaskConnection,
@@ -2125,6 +2168,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     onRemoteResourceChanged: subscribeRemoteResourceChanged,
   }), [
     beginBackgroundTransition,
+    holdBackgroundConnection,
     closeLink,
     recoveringDeviceIds,
     connectionEpoch,

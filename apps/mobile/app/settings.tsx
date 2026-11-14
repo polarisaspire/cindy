@@ -60,7 +60,12 @@ import { LEGAL_LINKS } from '@/config/legalLinks';
 import { useDeviceLink } from '@/device-link/DeviceLinkContext';
 import { buildMobileDeviceName } from '@/device-link/mobileDeviceIdentity';
 import { formatRemoteError } from '@/device-link/remoteStatus';
-import { clearSelfHostedRelay, useSelfHostedRelay } from '@/device-link/selfHostedRelay';
+import {
+  clearSelfHostedRelay, forgetSelfHostedRelay, resumeSelfHostedRelay,
+  useSavedSelfHostedRelay, useSelfHostedRelay,
+} from '@/device-link/selfHostedRelay';
+import { getSelfHostedRelayRouteGeneration } from '@/device-link/selfHostedRelayRouting';
+import { getMobileAuthOwner, isMobileAuthOwnerCurrent } from '@/auth/authOwnerGeneration';
 import { useRelayAccountOffers } from '@/device-link/relayAccountDirectory';
 import { RELAY_JOIN_ROUTE, startRelayAccountJoin } from '@/device-link/relayJoinIntent';
 import { AgentNetSettingsGroup } from '@/device-link/AgentNetSettingsGroup';
@@ -162,6 +167,7 @@ export default function SettingsScreen() {
   const { status, connectionIssue } = useDeviceLink();
   // 中转服务:官方中转或自建中转(docs/self-hosted-relay-plan.md §5.3)。
   const selfHostedRelay = useSelfHostedRelay();
+  const savedRelay = useSavedSelfHostedRelay();
   // 同账号电脑正在用的中转:不用链接,点一下确认就加入(§5.4)。
   const accountRelays = useRelayAccountOffers().filter((offer) => offer.relayId !== selfHostedRelay?.relayId);
   const [relaySwitching, setRelaySwitching] = useState(false);
@@ -447,8 +453,7 @@ export default function SettingsScreen() {
     router.push('/account-deletion');
   }, [router]);
 
-  // 切回官方中转:先确认(之后要再用这个中转得在电脑上重新加入);删掉本机设置与凭证,
-  // 连接随路由变化重建。不会自动切回,只在用户确认后执行。
+  // 切换线路保留成员资格；只有下面的明确退出才删除凭证。
   const switchToOfficialRelay = useCallback(async () => {
     if (relaySwitching) return;
     setRelaySwitching(true);
@@ -464,16 +469,70 @@ export default function SettingsScreen() {
 
   const requestSwitchToOfficialRelay = useCallback(() => {
     if (!selfHostedRelay || relaySwitching) return;
+    const owner = getMobileAuthOwner();
     Alert.alert(
       t('relay.settings.confirmTitle'),
       t('relay.settings.confirmBody', { name: selfHostedRelay.name }),
       [
         { text: t('devices.common.cancel'), style: 'cancel' },
-        { text: t('relay.settings.confirmAction'), style: 'destructive', onPress: () => void switchToOfficialRelay() },
+        { text: t('relay.settings.confirmAction'), onPress: () => {
+          if (isMobileAuthOwnerCurrent(owner)) void switchToOfficialRelay();
+        } },
       ],
     );
   }, [relaySwitching, selfHostedRelay, switchToOfficialRelay, t]);
 
+  const useSavedRelay = useCallback(async () => {
+    if (relaySwitching) return;
+    setRelaySwitching(true);
+    setRelayMessage(null);
+    try {
+      await resumeSelfHostedRelay();
+    } catch (error) {
+      setRelayMessage(t(error instanceof Error && error.message === 'RELAY_CREDENTIAL_MISSING'
+        ? 'relay.errors.credentialUnavailable' : 'relay.settings.resumeFailed'));
+    } finally {
+      setRelaySwitching(false);
+    }
+  }, [relaySwitching, t]);
+
+  const requestUseSavedRelay = useCallback(() => {
+    if (!savedRelay || relaySwitching) return;
+    const owner = getMobileAuthOwner();
+    const action = t('relay.settings.useSaved', { name: savedRelay.name });
+    Alert.alert(action, t('relay.settings.selfHostedHint', { address: savedRelay.baseUrl }), [
+      { text: t('devices.common.cancel'), style: 'cancel' },
+      { text: action, onPress: () => {
+        if (isMobileAuthOwnerCurrent(owner)) void useSavedRelay();
+      } },
+    ]);
+  }, [relaySwitching, savedRelay, t, useSavedRelay]);
+
+  const forgetRelay = useCallback(async () => {
+    if (relaySwitching) return;
+    setRelaySwitching(true);
+    setRelayMessage(null);
+    try {
+      await forgetSelfHostedRelay();
+    } catch {
+      setRelayMessage(t('relay.settings.forgetFailed'));
+    } finally {
+      setRelaySwitching(false);
+    }
+  }, [relaySwitching, t]);
+
+  const requestForgetRelay = useCallback(() => {
+    if (!selfHostedRelay || !savedRelay || relaySwitching) return;
+    const owner = getMobileAuthOwner();
+    const routeGeneration = getSelfHostedRelayRouteGeneration();
+    Alert.alert(t('relay.settings.forgetTitle'), t('relay.settings.forgetBody', { name: savedRelay.name }), [
+      { text: t('devices.common.cancel'), style: 'cancel' },
+      { text: t('relay.settings.forget'), style: 'destructive', onPress: () => {
+        if (isMobileAuthOwnerCurrent(owner)
+          && getSelfHostedRelayRouteGeneration() === routeGeneration) void forgetRelay();
+      } },
+    ]);
+  }, [forgetRelay, relaySwitching, savedRelay, selfHostedRelay, t]);
   const requestJoinAccountRelay = useCallback((offer: (typeof accountRelays)[number]) => {
     if (relaySwitching) return;
     Alert.alert(
@@ -733,8 +792,8 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* 中转服务:当前走官方中转还是自建中转;自建时提供「切回官方中转」。
-            同账号电脑正在用的中转列在这里,点一下确认就加入;别人分享的中转用相机扫码打开加入页,这里不放扫码入口。 */}
+        {/* 切换线路保留已加入中转；退出是独立且需确认的操作。
+            加入自建中转从电脑上的二维码进入(相机扫码打开加入页),这里不放扫码入口。 */}
         <SettingsGroup
           footer={selfHostedRelay?.shared
             ? t('relay.settings.sharedHint', { address: selfHostedRelay.baseUrl })
@@ -781,6 +840,27 @@ export default function SettingsScreen() {
               label={t('relay.settings.switchToOfficial')}
               onPress={requestSwitchToOfficialRelay}
               testID="settings.relay.switchToOfficial"
+            />
+          ) : null}
+          {!selfHostedRelay && savedRelay ? (
+            <ActionInfoRow
+              accessibilityLabel={t('relay.settings.useSaved', { name: savedRelay.name })}
+              chevron={false}
+              disabled={relaySwitching}
+              label={t('relay.settings.useSaved', { name: savedRelay.name })}
+              onPress={requestUseSavedRelay}
+              testID="settings.relay.useSaved"
+            />
+          ) : null}
+          {selfHostedRelay && savedRelay ? (
+            <ActionInfoRow
+              accessibilityLabel={t('relay.settings.forget')}
+              chevron={false}
+              destructive
+              disabled={relaySwitching}
+              label={t('relay.settings.forget')}
+              onPress={requestForgetRelay}
+              testID="settings.relay.forget"
             />
           ) : null}
         </SettingsGroup>

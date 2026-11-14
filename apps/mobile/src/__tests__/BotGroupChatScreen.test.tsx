@@ -176,7 +176,7 @@ vi.mock('@/utils/backGuard', () => ({ goBackGuarded: h.leave }));
 vi.mock('@/utils/useTaskListBack', () => ({ useTaskListBack: () => h.leave }));
 vi.mock('@/platform/chrome/AnchoredPullDownMenu', () => ({ AnchoredPullDownMenu: ({ children }: any) => children }));
 vi.mock('@/device-link/remoteResourceCache', () => ({ markRemoteResourceRead: h.markRead }));
-vi.mock('@/device-link/remoteResourceAvailability', () => ({ readRemoteCollectionCache: () => [] }));
+vi.mock('@/device-link/remoteResourceAvailability', async (original) => ({ ...await original<typeof import('@/device-link/remoteResourceAvailability')>(), readRemoteCollectionCache: () => [] }));
 vi.mock('@/platform/chrome', () => ({ showConfirm: h.confirm }));
 vi.mock('@/platform/chrome/NativeSwitch', () => ({ NativeSwitch: ({ testID, value, disabled, onValueChange }: any) =>
   el('button', { 'data-testid': testID, role: 'switch', 'aria-checked': value, disabled, onClick: () => onValueChange(!value) }) }));
@@ -589,7 +589,9 @@ describe('group timeline', () => {
     [true, 'fr', 'Tous', undefined], [false, 'fr', 'Tous', undefined],
     [true, 'de', 'Al', 'Alle Teammitglieder'],
     [true, 'fr', 'Tous', 'Tous les coéquipiers'],
-    [true, 'es', 'Todos', 'Todos los compañeros'],
+    // #10063: 'Todos' is the current humans-only broadcast label. Keep a
+    // word-boundary prefix of the legacy bot broadcast without using that reserved label.
+    [true, 'es', 'Todos los', 'Todos los compañeros'],
     [true, 'pt-PT', 'Tod', 'Todos os colegas'],
     [true, 'pt-BR', 'Tod', 'Todos os colegas'],
     [true, 'zh-Hans-x-lzh', '诸', '诸同僚'],
@@ -3098,7 +3100,7 @@ describe('mobile group threads', () => {
     expect(byId(`botGroup.thread.context.${rootId}.action.quote`)).not.toBeNull();
     await click(`botGroup.thread.more.${rootId}`);
     expect(byId(`botGroup.thread.context.${rootId}.sheet`)?.textContent)
-      .toContain(new Date(rootMessage().createdAt).toLocaleString());
+      .toContain(new Date(rootMessage().createdAt).toLocaleString('zh-CN'));
   });
 
   it.each(['root', 'shared'] as const)('restores the retained group viewport without scrolling or marking it read after opening a %s topic entry', async entry => {
