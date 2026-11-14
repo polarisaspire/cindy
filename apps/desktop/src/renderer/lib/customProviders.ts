@@ -162,8 +162,8 @@ export function providerViewToCustomProviderConfig(p: ProviderView): CustomProvi
   };
 }
 
-/** Refresh metadata and append new models; native-engine defaults decide visibility. */
-export function appendDiscoveredCustomProviderModels(
+/** A successful full discovery owns membership; retained IDs keep user overrides. */
+export function syncDiscoveredCustomProviderModels(
   existing: readonly ProviderRuntimeModelConfig[],
   discovered: readonly DiscoveredModel[],
   discoveryUrl?: string,
@@ -188,7 +188,8 @@ export function appendDiscoveredCustomProviderModels(
     }
     prior = [...normalized.values()];
   }
-  const models = mergeDiscoveredRuntimeModels(prior, discovered);
+  const returnedIds = new Set(discovered.filter(model => model.id && model.name).map(model => model.id));
+  const models = mergeDiscoveredRuntimeModels(prior.filter(model => returnedIds.has(model.id)), discovered);
   const known = new Set(existing.map((model) => model.id));
   return {
     models,
@@ -232,6 +233,7 @@ export async function fetchCustomProviderModelsForRefresh(
       modelsUrl: rt.modelsUrl ?? null,
       // Saved encrypted headers and owner checks remain Main-only per agent.
       savedProviderId: provider.id,
+      allowEmpty: true,
     };
   }));
   return Promise.all(requests.map(async request => ({

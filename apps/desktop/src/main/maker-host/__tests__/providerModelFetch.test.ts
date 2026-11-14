@@ -595,6 +595,50 @@ describe('fetchProviderModels', () => {
     expect(notJson).toMatchObject({ ok: false, code: 'UNKNOWN' });
   });
 
+  // Refresh now removes absent IDs. Unit / production fetch entry: earlier tests
+  // accepted partial pages, which would incorrectly withdraw models on a timeout.
+  // Minimal failure: one valid page followed by a failed or malformed next page.
+  it('accepts a complete empty refresh but rejects malformed rows', async () => {
+    expect(await fetchProviderModels(spec({ allowEmpty: true }), async () =>
+      fakeResponse(200, '{"data":[]}'))).toMatchObject({ ok: true, models: [] });
+    for (const data of [[{}], ['valid', {}]]) {
+      expect(await fetchProviderModels(spec({ allowEmpty: true }), async () =>
+        fakeResponse(200, JSON.stringify({ data })))).toMatchObject({ ok: false });
+    }
+  });
+
+  it('keeps complete Google discovery usable when non-chat models are present', async () => {
+    const result = await fetchProviderModels(spec({ allowEmpty: true }), async () => fakeResponse(200,
+      JSON.stringify({ models: [
+        { name: 'models/chat', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/embedding', supportedGenerationMethods: ['embedContent'] },
+      ] })));
+    expect(result).toMatchObject({ ok: true, models: [{ id: 'chat' }] });
+  });
+
+  it.each(['complete', 'http-error', 'invalid', 'repeated', 'untrusted', 'missing-cursor'] as const)(
+    'requires complete pagination before replacing membership: %s', async kind => {
+      const fetcher = vi.fn<() => Promise<Response>>();
+      fetcher.mockImplementationOnce(async () => fakeResponse(200, JSON.stringify({ data: ['first'],
+        ...(kind === 'missing-cursor' ? { has_more: true }
+          : { next: kind === 'untrusted' ? 'https://other.example/v1/models' : '?page=2' }),
+      })));
+      fetcher.mockImplementation(async () => kind === 'http-error' ? fakeResponse(500, '{}')
+        : fakeResponse(200, JSON.stringify(kind === 'invalid' ? { unexpected: [] }
+          : { data: ['second'], ...(kind === 'repeated' ? { next: '?page=2' } : {}) })));
+      const result = await fetchProviderModels(spec({ allowEmpty: true }), fetcher);
+      expect(result.ok).toBe(kind === 'complete');
+      if (kind === 'complete') expect(result.models?.map(model => model.id)).toEqual(['first', 'second']);
+      if (kind === 'untrusted' || kind === 'missing-cursor') expect(fetcher).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not withdraw OpenRouter speech models when the speech catalog fails', async () => {
+    const result = await fetchProviderModels(spec({ allowEmpty: true, baseUrl: 'https://openrouter.ai/api/v1' }),
+      async url => String(url).includes('output_modalities') ? fakeResponse(503, '{}') : fakeResponse(200, '{"data":["chat"]}'));
+    expect(result.ok).toBe(false);
+  });
+
   it('end-to-end asserts the request URL and auth headers reach fetch', async () => {
     let seenUrl = '';
     let seenHeaders: Record<string, string> = {};
