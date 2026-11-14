@@ -28,7 +28,13 @@
     "sharedHint": "Os seus dispositivos ligam-se através de um relay partilhado consigo em {{address}} e só chegam aos seus próprios dispositivos. O início de sessão, os modelos, as tarefas partilhadas e outros serviços continuam a usar {{appName}}.",
     "sharedCurrent": "{{name}} (partilhado por {{owner}})",
     "accountSharedBy": "Partilhado por {{owner}} · adesão em «{{device}}»",
-    "accountSharedOn": "Adesão em «{{device}}»"
+    "accountSharedOn": "Adesão em «{{device}}»",
+    "useSaved": "Usar «{{name}}»",
+    "forget": "Sair e esquecer o relay",
+    "forgetTitle": "Sair do relay?",
+    "forgetBody": "Este telemóvel vai sair de «{{name}}» e apagar os dados de acesso guardados. Para voltar a usar este relay, terá de aderir novamente.",
+    "resumeFailed": "Não foi possível mudar para o relay guardado.",
+    "forgetFailed": "Não foi possível sair do relay."
   },
   "issue": {
     "removedTitle": "Removido do relay",
