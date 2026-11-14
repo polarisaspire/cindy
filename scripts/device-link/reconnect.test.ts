@@ -11,7 +11,7 @@ import {
   SESSION_ID,
   TOPICS,
 } from "./clientHarness";
-import { DEVICE_LINK_TRANSPORT_ACK_CHANNEL } from "../../packages/device-link/src/transport";
+import { DEVICE_LINK_TRANSPORT_ACK_CHANNEL, MAX_TRANSPORT_REASSEMBLIES, parseTransportPayload } from "../../packages/device-link/src/transport";
 import {
   DeviceLinkError,
   PROTOCOL_VERSION,
@@ -59,6 +59,44 @@ async function setup() {
 }
 
 describe("Device Link over real loopback WebSockets (contract fixture)", () => {
+  // Integration: real sockets + production clients. One lost mirror and no
+  // cumulative ACK fill only the receive window, not the pending buffer.
+  // Existing reconnect/full-buffer cases do not cover reply admission here.
+  it('delivers a reply past a lost mirror without waiting for its retry interval', async () => {
+    const relay = await createRelayFixture();
+    cleanups.push(() => relay.close());
+    const host = createClient(relay.url, 'host', true, { timing: { transportRetryIntervalMs: 60_000 } });
+    const controller = createClient(relay.url, 'phone');
+    cleanups.push(() => host.close(), () => controller.close());
+    const data = createHost(host.client);
+    cleanups.push(data.close);
+    host.client.start();
+    controller.client.start();
+    await until(() => {
+      expect(host.client.getStatus()).toBe('online');
+      expect(controller.client.getStatus()).toBe('online');
+    });
+    await controller.client.openLink('host', { controllerName: 'Phone', protocolVersion: PROTOCOL_VERSION, appVersion: 'test' });
+    await until(() => expect(host.client.isLinkReady('phone')).toBe(true));
+    let lostMirror = false;
+    relay.dropFrames(frame => {
+      if (frame.src === 'phone' && (frame.payload as { channel?: string })?.channel === DEVICE_LINK_TRANSPORT_ACK_CHANNEL) return true;
+      if (!lostMirror && frame.src === 'host' && frame.kind === 'push' && parseTransportPayload(frame.payload)) {
+        lostMirror = true;
+        return true;
+      }
+      return false;
+    });
+    for (let i = 0; i < MAX_TRANSPORT_REASSEMBLIES; i++) host.client.sendPush('phone', 'maker:event', { i });
+    await until(() => expect(lostMirror).toBe(true));
+    const result = await invoke(controller.client, 'host', 'local-db:sessions:list');
+    expect(result).toEqual([{ id: SESSION_ID, title: 'Fixture' }]);
+    expect(lostMirror).toBe(true);
+    expect([...data.executions.values()]).toEqual([1]);
+    expect(relay.connections.get('host')).toBe(1);
+    expect(relay.connections.get('phone')).toBe(1);
+  });
+
   it('reuses a full long list message over real sockets on both desktop and mobile', async () => {
     const relay = await createRelayFixture();
     cleanups.push(() => relay.close());
