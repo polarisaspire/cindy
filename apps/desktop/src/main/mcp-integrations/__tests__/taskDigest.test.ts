@@ -97,11 +97,17 @@ describe('task digest assembly', () => {
       phase: 'usage-limit', phaseSince: NOW - 30 * 60_000, lastActivityAt: NOW - 25 * 60_000, startedAt: null,
       pendingQuestion: null, error: '已达用量上限', creatorBotId: 'writer', followerBotId: 'writer', source: 'user',
     } satisfies WatchedSession;
-    const result = await setup({ 'local-1': row }).read({ sessionId: 'local-1' });
+    const assigned = setup({ 'local-1': row });
+    const result = await assigned.read({ sessionId: 'local-1' });
     expect(result).toMatchObject({
       ok: true,
       digest: { title: '修登录(状态表)', phase: 'usage-limit', elapsed_minutes: 30, idle_minutes: 25, error: '已达用量上限', creator_bot_id: 'writer', follower_bot_id: 'writer' },
     });
+    // A persisted transfer/release is newer authority than any retained watcher projection.
+    assigned.deps.local.readSession = async () => ({ title: 'task', status: 'active', route, followerBotId: 'new-owner' });
+    expect(await assigned.read({ sessionId: 'local-1' })).toMatchObject({ digest: { follower_bot_id: 'new-owner' } });
+    assigned.deps.local.readSession = async () => ({ title: 'task', status: 'active', route, followerBotId: null });
+    expect(await assigned.read({ sessionId: 'local-1' })).toMatchObject({ digest: { follower_bot_id: null } });
     // 只有本机且观察层给了这个事实才出现 tool_in_flight;另一台电脑的行缺省为 false 但并不可信,不给。
     const busy = { ...row, phase: 'running' as const, toolInFlight: true };
     const remoteIdle = { ...row, sessionId: 'laptop::s-1', phase: 'running' as const, toolInFlight: false };

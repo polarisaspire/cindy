@@ -1,0 +1,284 @@
+name: Personal desktop packages
+run-name: ${{ github.event_name == 'create' && format('Reviewed main @ {0}', github.sha) || inputs.upstream_tag && !inputs.validate_only && format('Stable {0} @ {1}', inputs.upstream_tag, github.sha) || format('Personal desktop @ {0}', github.sha) }}
+
+on:
+  # Never main pushes or a schedule: this is an explicit review-complete request.
+  create:
+  workflow_dispatch:
+    inputs:
+      validate_only:
+        description: Build the selected branch without publishing an update
+        type: boolean
+        default: true
+      expected_sha:
+        description: Expected main source SHA; a changed main fails before building
+        type: string
+        default: ''
+      upstream_tag:
+        description: Official stable release tag for automatic synchronization
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  # Serialize allocation as well as publication, across validation branches.
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/personal-release/'))) && 'personal-desktop' || format('personal-desktop-ignore-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Select version from published releases
+    if: github.repository == 'polarisaspire/cindy' && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || inputs.validate_only)) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/personal-release/')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      proceed: ${{ steps.gate.outputs.proceed }}
+      upstream_release: ${{ steps.gate.outputs.upstream_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require exact-source CI and skip already published upstream releases
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          VALIDATE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.validate_only }}
+          PUBLICATION_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
+        run: node scripts/sync-personal-upstream.mjs gate
+      - name: Select next release or resume this run
+        if: steps.gate.outputs.proceed == 'true'
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/personal-desktop-release.mjs plan >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package ${{ matrix.platform }} x64
+    needs: plan
+    if: needs.plan.outputs.proceed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+          - os: ubuntu-24.04
+            platform: linux
+            container: node:22-bookworm
+    runs-on: ${{ matrix.os }}
+    # An empty string means no container (Windows). Linux native rebuilds must
+    # inherit Debian 12's glibc 2.36, never the Ubuntu runner's newer libc.
+    container: ${{ matrix.container || '' }}
+    timeout-minutes: 120
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+      PERSONAL_VERSION: ${{ needs.plan.outputs.version }}
+      CINDY_FORK_UPDATE_REPOSITORY: ${{ github.repository }}
+      # Packaging ensures the pinned ripgrep itself; don't prefetch every harness.
+      XDT_SKIP_AGENT_BIN_INSTALL: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare Debian checkout tools
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          apt-get install --yes git git-lfs ca-certificates curl
+
+      - name: Checkout source and LFS assets
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          lfs: true
+          persist-credentials: false
+
+      - name: Trust the mounted checkout inside Debian container
+        if: runner.os == 'Linux'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git rev-parse --verify refs/remotes/origin/main
+
+      - name: Setup pinned pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Prepare Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Prepare Linux packaging and Electron runtime
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          apt-get install --yes \
+            build-essential python3 fakeroot dpkg desktop-file-utils libarchive-tools binutils xdg-utils xvfb xauth \
+            libgtk-3-0 libgbm1 libasound2 libnss3 libatk-bridge2.0-0 libcups2 libxss1 libxcomposite1 libxdamage1 libxrandr2 \
+            pkg-config libwayland-bin libwayland-dev libxkbcommon-dev libjson-c-dev libturbojpeg0-dev libpng-dev \
+            libx11-dev libxtst-dev
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Linux compatibility gate regressions
+        if: runner.os == 'Linux'
+        run: python3 scripts/__tests__/test_linux_glibc.py
+
+      - name: Check direct-link runtime and test hygiene
+        run: |
+          node scripts/direct-link-runtime.mjs --check
+          pnpm check:test-hygiene
+
+      - name: Verify client and self-hosted relay
+        run: |
+          pnpm --filter @cindy/device-link build
+          pnpm --filter @cindy/device-link test
+          pnpm --filter @cindy/device-link-relay typecheck
+          pnpm --filter @cindy/device-link-relay test
+          pnpm --filter @cindy/device-link-relay interop
+
+      - name: Typecheck desktop
+        run: pnpm --filter desktop typecheck
+
+      - name: Verify fork updates and publication recovery
+        run: |
+          node --test scripts/__tests__/personal-desktop-release.test.mjs scripts/__tests__/sync-personal-upstream.test.mjs
+          pnpm --filter desktop exec vitest run \
+            src/main/__tests__/forkAppUpdateSource.test.ts \
+            src/main/__tests__/releaseNotesService.test.ts \
+            src/main/__tests__/updateService.test.ts \
+            src/main/__tests__/manifestService.test.ts \
+            src/main/__tests__/updateAutoRelaunchPolicy.test.ts \
+            src/main/__tests__/updateVersionPolicy.test.ts
+
+      - name: Build Windows installer with packaged smoke
+        if: runner.os == 'Windows'
+        run: pnpm release:package --platform win32 --arch x64 --region global --version "$PERSONAL_VERSION" --no-sign
+
+      - name: Build Linux installer with packaged smoke
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum pnpm release:package --platform linux --arch x64 --region global --version "$PERSONAL_VERSION" --no-sign
+
+      - name: Record source revision and checksums
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          const dir = path.join('apps/desktop/release/artifacts/global', process.env.PERSONAL_VERSION, `${process.env.PACKAGE_PLATFORM}-x64`);
+          const files = fs.readdirSync(dir).filter(name => /\.(exe|deb|zip|json)$/.test(name)).sort();
+          if (!files.some(name => /\.(exe|deb)$/.test(name))) throw new Error('Installer missing');
+          fs.writeFileSync(path.join(dir, 'SOURCE.txt'), `${process.env.GITHUB_REPOSITORY}\n${process.env.GITHUB_SHA}\n${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}\n`);
+          const lines = [...files, 'SOURCE.txt'].map(name => `${createHash('sha256').update(fs.readFileSync(path.join(dir, name))).digest('hex')}  ${name}`);
+          fs.writeFileSync(path.join(dir, 'SHA256SUMS.txt'), lines.join('\n') + '\n');
+          NODE
+
+      - name: Upload personal installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: cindy-personal-${{ matrix.platform }}-x64-${{ github.sha }}
+          path: apps/desktop/release/artifacts/global/${{ needs.plan.outputs.version }}/${{ matrix.platform }}-x64/
+          if-no-files-found: error
+          retention-days: 14
+          # A full rerun retains the source/run identity but refreshes expired artifacts.
+          overwrite: true
+
+  linux-compatibility:
+    name: Install final deb on clean Debian 12
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: cindy-personal-linux-x64-${{ github.sha }}
+          path: linux-installer
+      - name: Install and exercise shipped binaries with Debian runtime libraries
+        run: |
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/source,readonly" \
+            node:22-bookworm-slim bash /source/scripts/verify-personal-debian12.sh
+
+  publish:
+    name: Publish verified personal updates
+    needs: [plan, package, linux-compatibility]
+    if: github.repository == 'polarisaspire/cindy' && needs.plan.outputs.proceed == 'true' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.validate_only) || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/personal-release/')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      PERSONAL_VERSION: ${{ needs.plan.outputs.version }}
+    concurrency:
+      group: personal-update-publication
+      cancel-in-progress: false
+    steps:
+      - name: Checkout publication tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Download both verified platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cindy-personal-*-x64-${{ github.sha }}
+          path: personal-downloads
+      - name: Verify complete release and generate app-only manifests
+        run: node scripts/personal-desktop-release.mjs prepare personal-downloads personal-release
+      - name: Recheck exact-source CI and publication identity
+        id: final_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          VALIDATE_ONLY: 'false'
+          PUBLICATION_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
+        run: node scripts/sync-personal-upstream.mjs gate
+      - name: Publish versioned release and preserve legacy updates
+        if: steps.final_gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PERSONAL_UPSTREAM_RELEASE: ${{ steps.final_gate.outputs.upstream_release }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          PUBLICATION_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
+        run: node scripts/personal-desktop-release.mjs publish personal-release
+

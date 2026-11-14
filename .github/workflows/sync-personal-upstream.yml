@@ -1,0 +1,44 @@
+name: Sync personal Cindy from upstream
+
+on:
+  # Explicit staging requests only. The daily controller owns ordering/review.
+  create:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/upstream-sync/'))) && 'personal-upstream-sync' || format('personal-upstream-ignore-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'polarisaspire/cindy' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'create' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'automation/upstream-sync/')))
+    runs-on: ubuntu-24.04
+    # Staging waits for CI but can never request an installer or release.
+    timeout-minutes: 85
+    steps:
+      - name: Checkout the maintained main branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_SYNC_TOKEN || github.token }}
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify release synchronization regressions
+        run: node --test scripts/__tests__/sync-personal-upstream.test.mjs
+      - name: Stage official stable releases without publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_SYNC_TOKEN: ${{ secrets.PERSONAL_SYNC_TOKEN != '' }}
+          SYNC_REQUEST: ${{ github.event_name == 'create' && github.event.ref || '' }}
+        run: node scripts/sync-personal-upstream.mjs stage
+      - name: Report incomplete synchronization
+        if: failure() || cancelled()
+        run: |
+          echo '::error::Upstream staging did not finish. Inspect the summary and CI run. This workflow never publishes; the previous released version remains available.'

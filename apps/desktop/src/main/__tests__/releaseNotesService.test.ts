@@ -1,9 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fetchReleaseNotes, fetchReleaseNotesIndex } from '../releaseNotesService';
 
 const { requestMock } = vi.hoisted(() => ({
   requestMock: vi.fn(),
 }));
+const fork = vi.hoisted(() => ({ repository: '' }));
+vi.mock('../forkAppUpdateSource', () => ({ getForkUpdateRepository: () => fork.repository }));
 
 vi.mock('electron', () => ({
   net: {
@@ -36,8 +39,38 @@ class MockResponse extends EventEmitter {
 
 describe('releaseNotesService', () => {
   beforeEach(() => {
-    vi.resetModules();
+    fork.repository = '';
     requestMock.mockReset();
+  });
+
+  // Production entry: fork notices must load from the same versioned release as
+  // the app, not the official CDN. Existing tests cover only official versions.
+  // Minimal failure: request 1.0.7 with a pinned fork; tier: unit, in-memory HTTP.
+  // Measured with the companion manifest test: 1.38 s (Windows, 2026-11-04).
+  it('loads fork notes and history from versioned releases, rejecting a mismatched payload', async () => {
+    fork.repository = 'polarisaspire/cindy';
+    const respond = (body: unknown) => {
+      const req = new MockRequest();
+      req.end.mockImplementation(() => {
+        const res = new MockResponse();
+        req.emit('response', res);
+        res.emit('data', Buffer.from(JSON.stringify(body)));
+        res.emit('end');
+      });
+      requestMock.mockReturnValueOnce(req);
+    };
+    respond({ version: '1.0.8', date: '2026-11-04', topics: [{ title: 'Changes', text: 'Wrong version' }] });
+    expect(await fetchReleaseNotes('1.0.7')).toBeNull();
+    const notes = { version: '1.0.7', date: '2026-11-04', topics: [{ title: 'Changes', text: 'Fork changes' }] };
+    respond(notes);
+    expect(await fetchReleaseNotes('1.0.7')).toEqual(notes);
+    expect(requestMock).toHaveBeenLastCalledWith(expect.stringContaining('/polarisaspire/cindy/releases/download/v1.0.7/release-notes.json'));
+    respond(['1.0.7', '../bad', '0.1.124']);
+    expect(await fetchReleaseNotesIndex()).toEqual(['1.0.7']);
+    expect(requestMock).toHaveBeenLastCalledWith(expect.stringContaining('/polarisaspire/cindy/releases/latest/download/release-notes-index.json'));
+    requestMock.mockClear();
+    expect(await fetchReleaseNotes('../bad')).toBeNull();
+    expect(requestMock).not.toHaveBeenCalled();
   });
 
   it('按 UTF-8 流式解码跨 chunk 的中文字符，避免生成替换字符', async () => {
@@ -45,7 +78,6 @@ describe('releaseNotesService', () => {
     const response = new MockResponse();
     requestMock.mockReturnValue(request);
 
-    const { fetchReleaseNotes } = await import('../releaseNotesService');
     const promise = fetchReleaseNotes('0.0.122');
 
     request.emit('response', response);
@@ -82,7 +114,6 @@ describe('releaseNotesService', () => {
   });
 
   it('无可渲染内容的 200 payload 按失败处理且不写缓存(重试会重新请求 CDN)', async () => {
-    const { fetchReleaseNotes } = await import('../releaseNotesService');
 
     const emptyPayload = JSON.stringify({
       version: '0.1.20',
@@ -113,7 +144,6 @@ describe('releaseNotesService', () => {
     const response = new MockResponse();
     requestMock.mockReturnValueOnce(request);
 
-    const { fetchReleaseNotes } = await import('../releaseNotesService');
     const first = fetchReleaseNotes('0.1.23');
     request.emit('response', response);
     response.emit('data', Buffer.from(JSON.stringify({
@@ -139,7 +169,6 @@ describe('releaseNotesService', () => {
     const response = new MockResponse();
     requestMock.mockReturnValueOnce(request);
 
-    const { fetchReleaseNotes } = await import('../releaseNotesService');
     const first = fetchReleaseNotes('0.1.25');
     const second = fetchReleaseNotes('0.1.25');
 
@@ -158,7 +187,7 @@ describe('releaseNotesService', () => {
   });
 
   it('localized 内容全部为空或畸形时按失败处理且不缓存', async () => {
-    const { fetchReleaseNotes } = await import('../releaseNotesService');
+
     const payload = JSON.stringify({
       version: '0.1.24',
       date: '2026-08-06',
@@ -187,7 +216,6 @@ describe('releaseNotesService', () => {
   describe('重试逻辑', () => {
     it('网络错误后重试成功', async () => {
       vi.useFakeTimers();
-      const { fetchReleaseNotes } = await import('../releaseNotesService');
 
       const req1 = new MockRequest();
       const req2 = new MockRequest();
@@ -221,7 +249,6 @@ describe('releaseNotesService', () => {
     });
 
     it('HTTP 404 不重试，直接返回 null', async () => {
-      const { fetchReleaseNotes } = await import('../releaseNotesService');
 
       const req = new MockRequest();
       const resp = new MockResponse();
@@ -239,7 +266,6 @@ describe('releaseNotesService', () => {
 
     it('全部重试耗尽后返回 null', async () => {
       vi.useFakeTimers();
-      const { fetchReleaseNotes } = await import('../releaseNotesService');
 
       // 4 次全部网络错误（首次 + 3 次重试 = 4 次）
       const reqs = Array.from({ length: 4 }, () => new MockRequest());
@@ -267,7 +293,6 @@ describe('releaseNotesService', () => {
 
     it('超时视为可重试，第二次成功', async () => {
       vi.useFakeTimers();
-      const { fetchReleaseNotes } = await import('../releaseNotesService');
 
       const req1 = new MockRequest();
       const req2 = new MockRequest();
@@ -302,7 +327,6 @@ describe('releaseNotesService', () => {
   });
 
   it('sections 非空但全部畸形(无任何有效 bullet)同样按失败处理不缓存', async () => {
-    const { fetchReleaseNotes } = await import('../releaseNotesService');
 
     const payload = JSON.stringify({
       version: '0.1.21',

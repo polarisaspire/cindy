@@ -15,6 +15,7 @@ import { afterEach, test } from 'node:test';
 import {
   LOG_UPLOAD_TARGET_ENV,
   desktopLogUploadBuildEnv,
+  desktopPackageLogUploadBuildEnv,
   mobileLogUploadBuildEnv,
   mobileLogUploadConfigRequired,
   loadLogUploadTargets,
@@ -27,6 +28,27 @@ const VALID = {
   global: { project: 'global-proj', logstore: 'global-log', slsRegion: 'ap-southeast-1' },
   dev: null,
 };
+
+// Regression: versioned personal CI cannot access the official private log target.
+// Production package env boundary, unit tier; existing allowMissing tests only
+// cover unversioned packages. Personal builds must stay opted out even if a
+// local official config exists. Tiny synthetic config files, no real endpoints.
+test('versioned fork packaging explicitly disables official log upload', () => {
+  const missing = path.join(makeTempDir('cindy-fork-upload-'), 'missing.json');
+  const options = { authRegion: 'global', versionless: false, forkUpdateRepository: 'polarisaspire/cindy' };
+  assert.deepEqual(desktopPackageLogUploadBuildEnv({ ...options, configPath: missing }), { [LOG_UPLOAD_TARGET_ENV]: '' });
+  const dir = makeTempDir('cindy-fork-upload-existing-');
+  const configPath = path.join(dir, 'log-upload.json');
+  fs.writeFileSync(configPath, JSON.stringify(VALID));
+  assert.deepEqual(desktopPackageLogUploadBuildEnv({ ...options, configPath }), { [LOG_UPLOAD_TARGET_ENV]: '' });
+  assert.throws(() => desktopPackageLogUploadBuildEnv({ ...options, forkUpdateRepository: '../other', configPath: missing }), /fork/i);
+});
+
+test('official versioned packages still require their private log config', () => {
+  const missing = path.join(makeTempDir('cindy-official-upload-'), 'missing.json');
+  assert.throws(() => desktopPackageLogUploadBuildEnv({ authRegion: 'global', versionless: false, configPath: missing }), /缺少日志上报配置/);
+  assert.deepEqual(desktopPackageLogUploadBuildEnv({ authRegion: 'global', versionless: true, configPath: missing }), { [LOG_UPLOAD_TARGET_ENV]: '' });
+});
 
 test('mobile store profiles require upload config while local builds may omit it', () => {
   const missing = path.join(makeTempDir('cindy-mobile-upload-'), 'missing.json');

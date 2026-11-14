@@ -47,6 +47,7 @@ import {
 } from './manifestService';
 import { isRunningUnderArm64Translation } from './arm64Translation';
 import type { Manifest } from './manifestService';
+import { fetchForkAppManifest, getForkUpdateBaseUrl, getForkUpdateRepository, isForkAppManifest } from './forkAppUpdateSource';
 import { download, DownloadError } from './downloader/index';
 import { ProgressNormalizer } from './updateProgressNormalizer';
 import { compareAppUpdateVersions } from './updateVersionPolicy';
@@ -143,6 +144,8 @@ interface PatchInfo {
    * 旧 patch-info 没有这个字段,保持原行为。
    */
   enableBeta?: boolean;
+  /** App distribution source; absent on historical official patches. */
+  forkRepository?: string;
   /**
    * 补丁的目标架构，仅在 Rosetta 下的 x64 包下载 arm64 原生包时写 'arm64'。
    * 冷启动据此把同版本补丁认作待安装的换装，换装后进程已是 arm64 即按「已应用」清理。
@@ -353,12 +356,26 @@ function ensureWindowsUpdaterPrerequisites(options?: {
   return true;
 }
 
+/** Fork distributions always wait for explicit installation confirmation. */
+function effectiveAutoRelaunchOnIdle(): boolean {
+  return !getForkUpdateRepository() && readAutoUpdateSettings().autoRelaunchOnIdle;
+}
+
+async function fetchAppManifest(timeoutMs?: number): Promise<Manifest | null> {
+  if (!getForkUpdateRepository()) return fetchAppUpdateManifest(timeoutMs);
+  if (isDev()) return null;
+  // The official feed also notifies the independent engine download observer.
+  // Refresh it without waiting or using its application entry as a fallback.
+  void fetchManifest(timeoutMs).catch(() => log.warn('Official engine manifest refresh failed'));
+  return fetchForkAppManifest(getForkUpdateRepository(), `${process.platform}-${process.arch}`, timeoutMs);
+}
+
 function autoUpdateSettingsWire() {
   const state = readAutoUpdateSettingsState();
   return {
-    autoRelaunchOnIdle: state.value.autoRelaunchOnIdle,
+    autoRelaunchOnIdle: getForkUpdateRepository() ? false : state.value.autoRelaunchOnIdle,
     isCustomized: state.isCustomized,
-    defaultAutoRelaunchOnIdle: state.defaults.autoRelaunchOnIdle,
+    defaultAutoRelaunchOnIdle: getForkUpdateRepository() ? false : state.defaults.autoRelaunchOnIdle,
   };
 }
 
@@ -390,7 +407,7 @@ async function hasBusyTasks(): Promise<boolean> {
 }
 
 async function getAutoRelaunchBlockReasonForCurrentState(): Promise<AutoRelaunchBlockReason | null> {
-  if (!readAutoUpdateSettings().autoRelaunchOnIdle) return 'disabled';
+  if (!effectiveAutoRelaunchOnIdle()) return 'disabled';
   if (isDev()) return 'dev';
   if (currentStatus !== 'ready') return 'not-ready';
   if (lastErrorCode === WINDOWS_UPDATER_RUNTIME_MISSING_ERROR_CODE) return 'not-ready';
@@ -400,7 +417,7 @@ async function getAutoRelaunchBlockReasonForCurrentState(): Promise<AutoRelaunch
   // The busy probe can await SQLite. Re-snapshot every mutable gate after it
   // settles so settings/status/relaunch changes during that window cannot be
   // bypassed by stale values at the final apply boundary.
-  const enabled = readAutoUpdateSettings().autoRelaunchOnIdle;
+  const enabled = effectiveAutoRelaunchOnIdle();
   const dev = isDev();
   const status = currentStatus;
   const relaunching = isRelaunching || autoRelaunchInProgress;
@@ -439,6 +456,7 @@ async function getAutoRelaunchBlockReasonForCurrentState(): Promise<AutoRelaunch
  * full policy via getAutoRelaunchBlockReasonForCurrentState.)
  */
 async function getStartupRelaunchBlockReason(): Promise<AutoRelaunchBlockReason | null> {
+  if (getForkUpdateRepository()) return 'disabled';
   if (isDev()) return 'dev';
   if (currentStatus !== 'ready') return 'not-ready';
   if (lastErrorCode === WINDOWS_UPDATER_RUNTIME_MISSING_ERROR_CODE) return 'not-ready';
@@ -497,7 +515,7 @@ async function requestAutoRelaunch(
     if (blockReason) {
       if (blockReason !== lastAutoRelaunchBlockReason) {
         lastAutoRelaunchBlockReason = blockReason;
-        if (readAutoUpdateSettings().autoRelaunchOnIdle && currentStatus === 'ready') {
+        if (effectiveAutoRelaunchOnIdle() && currentStatus === 'ready') {
           log.info('auto relaunch blocked (%s)', blockReason);
         }
       }
@@ -637,7 +655,7 @@ export function isUpdateRelaunchImminent(): boolean {
   if (process.platform === 'linux') return false;
   // Respecting the user's switch: with auto-relaunch off the patch just sits
   // there until they click the banner, which is not "imminent".
-  return readAutoUpdateSettings().autoRelaunchOnIdle;
+  return effectiveAutoRelaunchOnIdle();
 }
 
 export function setUpdateAutoRelaunchBusyProbe(
@@ -738,6 +756,11 @@ function checkExistingPatch(): {
   const patchFilePath = path.join(updatesDir, patchInfo.fileName);
   if (!fs.existsSync(patchFilePath)) {
     removePatchInfo();
+    return { action: 'check' };
+  }
+
+  if ((patchInfo.forkRepository ?? '') !== getForkUpdateRepository()) {
+    discardExistingPatch(patchInfo, patchFilePath, true);
     return { action: 'check' };
   }
 
@@ -1202,7 +1225,11 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
     setStatus('checking');
   }
 
-  const manifest = manifestOverride ?? await fetchAppUpdateManifest();
+  const manifest = manifestOverride ?? await fetchAppManifest();
+  if (getForkUpdateRepository() && manifest && !isForkAppManifest(manifest, getForkUpdateRepository())) {
+    if (!wasReady) currentStatus = 'idle';
+    return 'manifest_failed';
+  }
   if (!manifest) {
     log.info('Manifest fetch failed');
     if (!wasReady) currentStatus = 'idle';
@@ -1272,7 +1299,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
 
   log.info('Update available: %s → %s (wasReady=%s)', currentVersion, latestVersion, wasReady);
 
-  const downloadUrl = `${getBaseUrl()}/${asset.file}`;
+  const downloadUrl = `${getForkUpdateRepository() ? getForkUpdateBaseUrl() : getBaseUrl()}/${asset.file}`;
   const fileName = path.basename(asset.file);
   const destPath = path.join(getUpdatesDir(), fileName);
 
@@ -1402,6 +1429,7 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
       sha256: asset.sha256.toLowerCase(),
       requireRelogin,
       enableBeta: channelEnableBetaAtStart,
+      ...(getForkUpdateRepository() ? { forkRepository: getForkUpdateRepository() } : {}),
       ...(targetArch ? { targetArch } : {}),
     });
     // release-relogin-on-update: drop the marker the moment we've committed a
@@ -2221,7 +2249,7 @@ export async function checkAppUpdateForAgent(): Promise<{
   // An Agent check must not stage a patch: checkForUpdate() downloads it and
   // enables the existing auto-relaunch-on-idle path. Read only the manifest;
   // the user can download and install through the built-in update action.
-  const manifest = await fetchAppUpdateManifest();
+  const manifest = await fetchAppManifest();
   if (!manifest) return { status: 'manifest_failed', currentVersion, reason: '无法读取当前渠道的更新信息。' };
   // Agent 的安装结果按「重启后版本前进」判定，同版本换装原生架构只走侧栏更新提示。
   const relation = compareAppUpdateVersions(manifest.app?.version, currentVersion);
@@ -2358,14 +2386,14 @@ export async function applyConfirmedAppUpdateForAgent(options: {
 
 /** Effective idle auto-install switch (Settings → About), shared with the Agent tools. */
 export function readAutoRelaunchOnIdleForAgent(): boolean {
-  return readAutoUpdateSettings().autoRelaunchOnIdle;
+  return effectiveAutoRelaunchOnIdle();
 }
 
 /** Same write as the Settings toggle IPC; only called after the user confirmed the Host card. */
 export function setAutoRelaunchOnIdleForAgent(enabled: boolean): boolean {
   writeAutoRelaunchOnIdle(enabled);
   void evaluateAutoRelaunch('agent-settings-set');
-  return readAutoUpdateSettings().autoRelaunchOnIdle;
+  return effectiveAutoRelaunchOnIdle();
 }
 
 export function initUpdateService(): void {
@@ -2641,7 +2669,7 @@ export function initUpdateService(): void {
       // Step 1: prefer manifest (so we don't relaunch into a stale intermediate version).
       // 启动态用短超时，避免 external CDN 慢时阻塞启动关键路径（#26）。
       // 后台 30-min 轮询仍走默认 30s 超时。
-      const manifest = await fetchAppUpdateManifest(STARTUP_MANIFEST_TIMEOUT_MS);
+      const manifest = await fetchAppManifest(STARTUP_MANIFEST_TIMEOUT_MS);
 
       if (!manifest) {
         // Network unavailable — fall back to local patch.

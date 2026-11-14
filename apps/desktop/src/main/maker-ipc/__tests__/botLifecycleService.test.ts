@@ -147,7 +147,7 @@ describe('Bot lifecycle coordinator', () => {
   });
 
   afterEach(() => {
-    sqlite.close();
+    sqlite?.close();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });

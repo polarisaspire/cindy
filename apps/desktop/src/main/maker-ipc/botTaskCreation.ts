@@ -17,6 +17,7 @@ import { broadcastBotLinkedProjectsChanged } from './botLinkedProjectStore.js';
 import { broadcastBotRemoteResourceChanged } from './botRemoteResourceInvalidation.js';
 import { listBotDelegationChildIds } from './botDelegationHistory.js';
 import { createdSessionIds, readTaskResponsibilities, setTaskResponsibility } from './botTaskResponsibility.js';
+import { assignedSessionIds, readTaskAssignments } from './taskAssignments.js';
 
 type Failure = { ok: false; errorCode: string; message: string };
 export type TeammateCallerResult = { ok: true; botId: string } | Failure;
@@ -78,7 +79,8 @@ export async function readBotResponsibilityScope(
   const records = await readTaskResponsibilities(userDataDir, botId);
   const created = [...new Set([...createdSessionIds(records), ...await listBotDelegationChildIds(botId)])].sort();
   return {
-    sessionIds: created.filter((id) => records[id]?.responsible !== false),
+    sessionIds: assignedSessionIds(botId, created.filter((id) => records[id]?.responsible !== false),
+      await readTaskAssignments(userDataDir)),
     delegatedSessionIds: created,
   };
 }

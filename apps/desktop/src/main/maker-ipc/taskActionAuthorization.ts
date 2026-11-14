@@ -9,6 +9,10 @@ type Decision = Awaited<ReturnType<ToolCallAuthorizer>>;
 /** These names describe effects, not tool visibility or an Agent permission mode. */
 export const TASK_ACTION_TOOLS: ReadonlySet<string> = new Set([
   'set_teammate_project',
+  'set_teammate_follow_up',
+  'set_task_responsibility',
+  'set_workbench_task_responsibility',
+  'continue_workbench_task',
   'send_to_session',
   'steer_session',
   'stop_session_turn',
@@ -227,6 +231,7 @@ const REVOKED_MESSAGES: ReadonlySet<string> = new Set([
  * code (`GROUP_AUTHORIZATION_UNAVAILABLE` is the temporary one) to avoid importing the group module.
  */
 export function taskActionRevocationCode(error: unknown): string | undefined {
+  if (error instanceof Error && error.message === 'ASSIGNMENT_REVOKED') return 'ASSIGNMENT_REVOKED';
   if (error instanceof TaskActionAuthorizationError) return 'TASK_ACTION_AUTHORIZATION_EXPIRED';
   if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'GROUP_AUTHORIZATION_REQUIRED')
     return 'GROUP_AUTHORIZATION_REQUIRED';
@@ -285,11 +290,22 @@ export async function settleTaskActionInput(item: AgentInputQueuedMessage): Prom
 }
 
 /** Restored input that needed a live grant has attribution, not consent. Never infer a grant from that data. */
+let taskAssignmentInputValidator: ((target: string, item: AgentInputQueuedMessage) => Promise<void>) | undefined;
+export function setTaskAssignmentInputValidator(validate: typeof taskAssignmentInputValidator): void {
+  taskAssignmentInputValidator = validate;
+}
+
 export function taskActionInputGuard(
   target: string,
   item: AgentInputQueuedMessage,
 ): (() => Promise<void>) | undefined {
   const guard = (item as GuardedInput)[TASK_ACTION_INPUT_GUARD];
+  if (item.clientId.startsWith('task-assignment-')) return async () => {
+    if (item.taskActionRequiresAuthorization && !guard) throw new Error('TASK_ACTION_AUTHORIZATION_REQUIRED');
+    if (!taskAssignmentInputValidator) throw new Error('HOST_NOT_READY');
+    await taskAssignmentInputValidator(target, item);
+    if (guard) await guard(target, item);
+  };
   if (guard) return () => guard(target, item);
   if (
     item.taskActionRequiresAuthorization ||

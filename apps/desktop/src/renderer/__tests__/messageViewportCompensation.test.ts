@@ -180,7 +180,7 @@ describe('restored reading position handoff through MessageStream.handleScroll',
       chipJumpGenerationRef: { current: null },
       chipJumpInProgressRef: { current: false },
       saveScrollSnapshot: vi.fn(), clearChipJumpSuppression: vi.fn(),
-      // CI 41649027355: handleScroll now delegates jump visibility to this hook.
+      // The production handler delegates jump-button state to this hook callback.
       setIsNearBottom: vi.fn(), setUnreadKeys: vi.fn(), updateJumpDown: vi.fn(),
       setFirstVisibleItemKey: vi.fn(), setAnchoredForwardItems: vi.fn(),
       unpinAutoFollowForUserUpIntent: vi.fn(), bumpSendFollowCancelGeneration: vi.fn(),
@@ -202,6 +202,7 @@ describe('restored reading position handoff through MessageStream.handleScroll',
     expect(bindings.clearChipJumpSuppression).toHaveBeenCalledOnce();
     expect(bindings.saveScrollSnapshot).toHaveBeenCalled();
     expect(bindings.isNearBottomRef.current).toBe(false);
+    expect(bindings.updateJumpDown).toHaveBeenLastCalledWith(400, false);
     state.top = 3400; // keep scrolling down to the end of the conversation
     scroll();
     expect(bindings.isNearBottomRef.current).toBe(true);

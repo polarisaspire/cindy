@@ -10,6 +10,8 @@ import type { HistoryDevice, TaskDigestRoute } from '@cindy/mcps';
 import type { AgentKind } from '@cindy/model-providers';
 
 import { getDbClient } from '../localDb/client/current.js';
+import { ownerScopedUserDataPath } from '../appSessionState.js';
+import { readTaskAssignments } from '../maker-ipc/taskAssignments.js';
 import { botProfileVersions, botSessionLinks, sessions } from '../localDb/schema.js';
 import { getActiveCatalog } from '../maker-host/active-catalog.js';
 import { readEffectiveBotModelChain } from '../maker-host/bot-model-chain-settings-store.js';
@@ -174,7 +176,9 @@ export function createDesktopTaskDigestDeps(host: DesktopTaskDigestHost): TaskDi
           .from(sessions)
           .where(eq(sessions.id, sessionId))
           .limit(1);
-        return row ? sessionFactsFromRow(row) : null;
+        const facts = row ? sessionFactsFromRow(row) : null;
+        return facts ? { ...facts,
+          followerBotId: (await readTaskAssignments(ownerScopedUserDataPath()))[sessionId]?.botId ?? null } : null;
       },
       readActivity: async (sessionId): Promise<TaskDigestActivity | null> => {
         const result = await host.getSessionRuntime(sessionId);

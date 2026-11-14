@@ -74,11 +74,14 @@ interface Attempt {
   idleTimer?: ReturnType<typeof setTimeout>;
   release?(): void;
   opened: boolean;
+  stable: boolean;
 }
 interface Peer {
   attempt?: Attempt;
   retry?: ReturnType<typeof setTimeout>;
   failures: number;
+  shortConnections: number;
+  cooldownUntil: number;
   touched: number;
   offerExpiresAt?: number;
   waiting?: { cancel(): void; timer: ReturnType<typeof setTimeout>; offer?: DirectSignal };
@@ -116,7 +119,7 @@ export class DirectLinkNegotiator {
     let peer = this.peers.get(peerId);
     if (!peer) {
       if (!this.makeRoom()) { this.rejected(peerId); return; }
-      peer = { failures: 0, touched: Date.now() };
+      peer = { failures: 0, shortConnections: 0, cooldownUntil: 0, touched: Date.now() };
       this.peers.set(peerId, peer);
     }
     if (peer.attempt || peer.retry || peer.waiting) return;
@@ -157,12 +160,21 @@ export class DirectLinkNegotiator {
       if (!self || !physicalPeer || physicalPeer >= self) return;
       if (!peer) {
         if (!this.makeRoom()) { this.rejected(peerId); return; }
-        peer = { failures: 0, touched: Date.now() };
+        peer = { failures: 0, shortConnections: 0, cooldownUntil: 0, touched: Date.now() };
         this.peers.set(peerId, peer);
       }
       if (peer.attempt?.id === signal.id) return;
       // A live session is not displaced by a duplicate/late offer. A retry first closes it.
       if (peer.attempt) return;
+      // An older initiator may retry every minute. Keep the local hold even
+      // when only the receiving endpoint has the stability fix.
+      if (Date.now() < peer.cooldownUntil) {
+        try {
+          this.deps.signal(peerId, { action: 'close', id: signal.id,
+            stream: streams.local, targetStream: streams.remote });
+        } catch { /* A lost close is bounded by the initiator's negotiation timeout. */ }
+        return;
+      }
       if (peer.waiting) return;
       peer.offerExpiresAt = Date.now() + DIRECT_LINK_TIMEOUT_MS;
       this.start(peerId, peer, signal);
@@ -207,7 +219,7 @@ export class DirectLinkNegotiator {
     catch { /* Diagnostics cannot interrupt relay fallback or capacity release. */ }
   }
   private rejected(peerId: string): void {
-    this.diagnose(peerId, { failures: 0, touched: Date.now() }, 'queue-full');
+    this.diagnose(peerId, { failures: 0, shortConnections: 0, cooldownUntil: 0, touched: Date.now() }, 'queue-full');
   }
   private makeRoom(): boolean {
     if (this.peers.size < 256) return true;
@@ -268,7 +280,12 @@ export class DirectLinkNegotiator {
           attempt.opened = true;
           this.diagnose(peerId, peer, 'connected');
           attempt.timer = setTimeout(() => {
-            if (this.current(peerId, peer, attempt)) peer.failures = 0;
+            if (this.current(peerId, peer, attempt)) {
+              attempt.stable = true;
+              peer.failures = 0;
+              peer.shortConnections = 0;
+              peer.cooldownUntil = 0;
+            }
           }, 60_000);
           const channel: DeviceLinkDirectChannel = {
             send: (text) => { peer.touched = Date.now(); session.send(text); },
@@ -283,7 +300,7 @@ export class DirectLinkNegotiator {
         drained: () => { if (this.current(peerId, peer, attempt)) attempt.handle?.drained(); },
         closed: (reason) => this.fail(peerId, peer, attempt, true, reason),
       }, { kind: this.kind(peerId) });
-      attempt = { id, localStream: streams.local, remoteStream: streams.remote, session, opened: false, release };
+      attempt = { id, localStream: streams.local, remoteStream: streams.remote, session, opened: false, stable: false, release };
       peer.attempt = attempt;
       attempt.timer = setTimeout(() => this.fail(peerId, peer, attempt, true, 'negotiation-timeout'),
         offer ? Math.max(1, (peer.offerExpiresAt ?? 0) - Date.now()) : DIRECT_LINK_TIMEOUT_MS);
@@ -328,6 +345,11 @@ export class DirectLinkNegotiator {
     if (this.peers.get(peerId) !== peer || peer.attempt !== attempt) return;
     peer.attempt = undefined;
     clearTimeout(attempt.timer);
+    if (attempt.opened && !attempt.stable && ++peer.shortConnections >= 3) {
+      // Repeatedly promoting a short-lived path disrupts otherwise healthy relay
+      // calls. Hold just this peer on relay for 4–5 minutes before another probe.
+      peer.cooldownUntil = Date.now() + Math.floor(300_000 * (0.8 + Math.random() * 0.2));
+    }
     clearTimeout(attempt.idleTimer);
     attempt.release?.();
     this.diagnose(peerId, peer, reason);
@@ -340,13 +362,15 @@ export class DirectLinkNegotiator {
   private retry(peerId: string, peer: Peer): void {
     if (Date.now() - peer.touched >= DIRECT_LINK_IDLE_MS && !this.deps.isBusy?.(peerId)) { this.forget(peerId); return; }
     if (this.peers.get(peerId) !== peer || peer.retry) return;
-    if (!this.deps.streams(peerId) || !this.deps.identity()
-      || this.deps.identity()! >= (this.deps.peerDeviceId ? this.deps.peerDeviceId(peerId) ?? '' : peerId)) {
+    if (!this.deps.streams(peerId) || !this.deps.identity()) {
       this.forget(peerId); return;
     }
+    // Only the offerer retries. Keep the receiver's flap cooldown so an older
+    // offerer cannot bypass the hold with another offer on the same stream.
+    if (this.deps.identity()! >= (this.deps.peerDeviceId ? this.deps.peerDeviceId(peerId) ?? '' : peerId)) return;
     const backoff = Math.min(60_000, 5_000 * 2 ** Math.min(peer.failures++, 4));
-    // Spread simultaneous peer failures even at the cap, without exceeding the retry ceiling.
-    const delay = Math.floor(backoff * (0.8 + Math.random() * 0.2));
+    // Spread ordinary retries even at the cap; flap cooldown is a separate per-peer floor.
+    const delay = Math.max(Math.floor(backoff * (0.8 + Math.random() * 0.2)), peer.cooldownUntil - Date.now());
     peer.retry = setTimeout(() => {
       peer.retry = undefined;
       if (this.peers.get(peerId) === peer) {

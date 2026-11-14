@@ -1,3 +1,4 @@
+import { providersSettings } from './ProvidersSection.settings-search';
 import { modelImageInputDefault } from '../../../shared/modelImageInputOverride';
 import { displayPricingComponent, isDisplayPricingTableRedundant } from '@/lib/displayPricingFormat';
 import { DisplayPricingDetails, DisplayPricingQuote } from '@/components/DisplayPricingDetails';
@@ -177,7 +178,7 @@ function Section({
         <h4 className="text-12 font-medium text-[var(--text-secondary)]">{title}</h4>
         {hint && (
           <Tip text={hint} contentClassName="z-[10002]">
-            <button
+            <button data-settings-search-action="Show the explanation for this model section"
               type="button"
               aria-label={hint}
               className="rounded-full p-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
@@ -838,7 +839,7 @@ export function ModelAdvancedDrawer({
                                         protocolLabel(protocol.outbound) ?? protocol.outbound ?? '',
                                       );
                                       return (
-                                        <Select data-settings-search-action="Choose the wire protocol this engine uses for the model"
+                                        <Select data-setting-id={providersSettings.modelProtocol.id}
                                           label={`${AGENT_LABEL[agent]} · ${t('settings.providers.custom.fields.wireProtocol')}`}
                                           size="compact"
                                           width="sm"
@@ -874,7 +875,7 @@ export function ModelAdvancedDrawer({
                                   contentClassName="z-[10002]"
                                   text={t('settings.providers.models.advanced.engineNotConfigured')}
                                 >
-                                  <button
+                                  <button data-settings-search-action="Explain why this model engine is not configured"
                                     type="button"
                                     aria-label={`${AGENT_LABEL[agent]} · ${t('settings.providers.models.advanced.engineNotConfigured')}`}
                                     className="inline-flex rounded-full p-1"
@@ -885,7 +886,7 @@ export function ModelAdvancedDrawer({
                               )}
                             </span>
                             <span className="inline-flex shrink-0 rounded-full border border-transparent p-0.5">
-                              <Switch
+                              <Switch data-setting-id={providersSettings.modelEngines.id}
                                 aria-describedby={protocol ? protocolId : undefined}
                                 data-compatibility={compatibility || undefined}
                                 checked={
@@ -913,7 +914,7 @@ export function ModelAdvancedDrawer({
                         );
                       })}
                       {visibilityCustomized && !paymentRequired && selectionAvailable && (
-                        <Button
+                        <Button data-settings-search-action="Restore catalog visibility for this model"
                           variant="secondary"
                           size="sm"
                           tone="quiet"
@@ -936,7 +937,7 @@ export function ModelAdvancedDrawer({
                       title={t('settings.providers.models.advanced.defaultEffort')}
                       hint={t('settings.providers.models.advanced.defaultEffortHint')}
                     >
-                      <SegmentedControl
+                      <SegmentedControl data-setting-id={providersSettings.modelEffort.id}
                         className="mt-1"
                         fullWidth
                         // Six translated labels exceed a details column. Keep every
@@ -968,7 +969,7 @@ export function ModelAdvancedDrawer({
                         (a) =>
                           rememberedEffort(a, row.byAgent[a]!.id) !== undefined,
                       ) && (
-                        <Button
+                        <Button data-settings-search-action="Clear remembered reasoning effort for this model"
                           variant="secondary"
                           size="sm"
                           tone="quiet"
@@ -1005,7 +1006,7 @@ export function ModelAdvancedDrawer({
                           {supportsMillionContext && (
                             <div className="mt-2 flex gap-2">
                               {[{ label: '256K', tokens: 262144 }, { label: '1M', tokens: 1_000_000 }].map((preset) => (
-                                <Button key={preset.tokens} variant={effectiveLimit === preset.tokens ? 'primary' : 'secondary'} compact
+                                <Button data-setting-id={providersSettings.modelContext.id} key={preset.tokens} variant={effectiveLimit === preset.tokens ? 'primary' : 'secondary'} compact
                                   aria-pressed={effectiveLimit === preset.tokens}
                                   disabled={paymentRequired || ctx.loading || localConfigurationBlocked}
                                   onClick={() => {
@@ -1026,7 +1027,7 @@ export function ModelAdvancedDrawer({
                                   : 'border-[var(--settings-theme-card-border)]',
                               )}
                             >
-                              <input
+                              <input data-setting-id={providersSettings.modelContext.id}
                                 value={ctxDraft}
                                 onChange={(event) => {
                                   ctxDirtyRef.current = true;
@@ -1129,7 +1130,7 @@ export function ModelAdvancedDrawer({
                     {imageModel && (
                       <>
                         <Row label={t('settings.providers.models.advanced.imageCapability.label')}>
-                          <Select data-settings-search-action="Declare the image capability of the Images connection model"
+                          <Select data-setting-id={providersSettings.modelImageCapability.id}
                             label={t('settings.providers.models.advanced.imageCapability.label')}
                             size="compact"
                             width="sm"
@@ -1149,7 +1150,7 @@ export function ModelAdvancedDrawer({
                     {videoModel && (
                       <>
                         <Row label={t('settings.providers.models.advanced.videoCapability.label')}>
-                          <Select data-settings-search-action="Declare the video capability of the video connection model"
+                          <Select data-setting-id={providersSettings.modelVideoCapability.id}
                             label={t('settings.providers.models.advanced.videoCapability.label')}
                             size="compact"
                             width="sm"
@@ -1193,7 +1194,7 @@ export function ModelAdvancedDrawer({
                                 : t(`settings.providers.models.advanced.${imageInputValue ? 'supported' : 'unsupported'}`),
                           );
                           return (
-                            <Select data-settings-search-action="Override whether this model accepts image input"
+                            <Select data-setting-id={providersSettings.modelImageInput.id}
                               label={t('settings.providers.models.advanced.imageInput')}
                               size="compact"
                               width="sm"
@@ -1294,13 +1295,12 @@ export function ModelAdvancedDrawer({
                 the manufacturer reference when one is declared. */}
             {!paymentRequired && (
               <div className="flex shrink-0 flex-col gap-2 border-t border-[var(--settings-theme-card-border)] px-5 py-3">
-                <Button
+                <Button data-setting-id={providersSettings.modelAdmission.id}
                   variant="secondary"
                   size="md"
                   compact
                   type="button"
                   disabled={disabled && !selectionAvailable}
-                  data-settings-search-action="Enable or disable the displayed model group"
                   onClick={() => { if (!pricePendingRef.current) onDisable(groupRow ?? row); }}
                 >
                   {disabled

@@ -75,6 +75,15 @@ jobs:
       - name: Run test runner self-tests
         run: pnpm test:runner
 
+      - name: Verify personal release planning and publication recovery
+        run: node --test scripts/__tests__/personal-desktop-release.test.mjs scripts/__tests__/sync-personal-upstream.test.mjs
+
+      - name: Inspect stable release tracking without publishing
+        if: github.repository == 'polarisaspire/cindy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/sync-personal-upstream.mjs inspect
+
       # Cross-file security, permission, and design contracts are intentionally
       # outside the ordinary behavior-test pool, but remain a required gate.
       - name: Run Desktop and Mobile source-contract guards
@@ -191,6 +200,8 @@ jobs:
 
       - name: Install Linux user-installer test tools
         timeout-minutes: 5
+        # Native canvas badge tests need a real bold sans-serif font. The runner
+        # image only promises emoji fonts; keep this prerequisite explicit.
         run: |
           # Keep Ubuntu's package signature checks and use official mirrors that
           # respond when mirrors.kernel.org stalls during TLS negotiation.
@@ -206,7 +217,8 @@ jobs:
             -o Acquire::https::Timeout=20
           )
           sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install --yes libarchive-tools binutils desktop-file-utils xdg-utils
+          sudo apt-get "${apt_options[@]}" install --yes libarchive-tools binutils desktop-file-utils xdg-utils fontconfig fonts-dejavu-core
+          fc-match 'sans-serif:style=Bold'
 
       - name: Run client and package unit test shard
         # package script 会传递 npm_execpath，让子进程复用当前 pnpm 入口。

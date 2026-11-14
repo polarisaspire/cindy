@@ -12,6 +12,7 @@ import type { WatchedSession } from '../../shared/botAutonomy.js';
 type Failure = { ok: false; errorCode: 'NOT_FOUND' | 'REMOTE_UNAVAILABLE' | 'INVALID_ARGS' | 'HOST_NOT_READY' | 'INTERNAL'; message: string };
 
 export interface TaskDigestSessionFacts {
+  followerBotId?: string | null;
   title: string;
   status: string;
   route: TaskDigestRoute | null;
@@ -286,7 +287,7 @@ function assemble(input: {
     suggested_route: input.suggestedRoute,
     pr_status: input.prStatus,
     queued_count: input.queuedCount,
-    follower_bot_id: watched?.followerBotId ?? null,
+    follower_bot_id: input.facts.followerBotId !== undefined ? input.facts.followerBotId : watched?.followerBotId ?? null,
     creator_bot_id: watched?.creatorBotId ?? null,
     ...(toolInFlight === undefined ? {} : { tool_in_flight: toolInFlight }),
     ...(input.facts.shared ? { shared_task: true } : {}),

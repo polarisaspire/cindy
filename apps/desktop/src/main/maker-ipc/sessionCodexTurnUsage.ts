@@ -124,7 +124,7 @@ export function recordSessionCodexTurnUsage(
         const hasEffectiveGatewayRoute =
           !isRemoteCodexSession &&
           !isCustomProviderRoute &&
-          (codexAuthInjection === 'env-key' ||
+          (((sessionProvider == null || sessionProvider === 'xd') && codexAuthInjection === 'env-key') ||
             isCodexBudgetRoute ||
             (sessionProvider === 'xd' && hasGatewayKey));
         // 显式来源的订阅判定以目录 access.kind 为权威(内置 anthropic 的 Claude.ai
@@ -280,8 +280,8 @@ export function recordSessionCodexTurnUsage(
           !isRemoteCodexSession &&
           !isCustomProviderRoute &&
           !isExclusiveXaiModelId(model) &&
-          (codexAuthInjection === 'env-key' ||
-            isCodexGatewayWireModel(model) ||
+          (((sessionProvider == null || sessionProvider === 'xd') && codexAuthInjection === 'env-key') ||
+            ((sessionProvider == null || sessionProvider === 'xd') && isCodexGatewayWireModel(model)) ||
             (sessionProvider === 'xd' && hasGatewayKey))
         ) {
           void triggerClaudeAccountUsageRefresh();

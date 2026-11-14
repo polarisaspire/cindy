@@ -46,6 +46,30 @@ const searchContext = { platform: 'win32', region: 'cn', mode: 'cloud', membersh
 } as const;
 
 describe('settings discoverability regressions', () => {
+  // Unit regression: model-detail preferences were not searchable. Query their
+  // rendered labels through the production catalog, including dynamic-page routing.
+  it.each([
+    ['modelEngines', 'settings.providers.models.advanced.engines'],
+    ['modelProtocol', 'settings.providers.custom.fields.wireProtocol'],
+    ['modelEffort', 'settings.providers.models.advanced.defaultEffort'],
+    ['modelContext', 'settings.providers.models.advanced.contextLimit'],
+    ['modelImageInput', 'settings.providers.models.advanced.imageInput'],
+    ['modelImageCapability', 'settings.providers.models.advanced.imageCapability.label'],
+    ['modelVideoCapability', 'settings.providers.models.advanced.videoCapability.label'],
+    ['modelPrice', 'settings.providers.models.priceOverride.menu'],
+    ['modelAdmission', 'settings.providers.models.disableModel'],
+  ])('finds %s by its visible label', (id, key) => {
+    for (const lng of ['zh-CN', 'en']) {
+      const translate = searchI18n.getFixedT(lng);
+      const documents = buildSettingsSearchDocuments(translate, TAB_IDS, searchContext);
+      const result = searchSettings(documents, translate(key))
+        .find(({ entry }) => entry.id === `providers.${id}`);
+      expect(result?.entry.tab).toBe('providers');
+      expect(result?.entry.targetId).toBe('settings-panel-providers');
+    }
+  });
+
+
   it('finds the local API import entry by its titles and source app names before mounting settings', () => {
     const documents = buildSettingsSearchDocuments(searchI18n.t, TAB_IDS, searchContext);
     for (const query of [
