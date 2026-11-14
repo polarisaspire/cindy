@@ -96,6 +96,9 @@ jobs:
           pnpm --filter desktop exec tsc --project ../../scripts/device-link/tsconfig.json
           pnpm test:device-link
 
+      - name: Verify self-hosted relay interoperability
+        run: pnpm --filter @cindy/device-link-relay run interop
+
       # DS-7: candidate merge/head versus the event base; only mature colour
       # consumers block. Geometry/adoption observations remain report-only.
       - name: Check added design colours
