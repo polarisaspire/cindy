@@ -1,7 +1,5 @@
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createCanvas, GlobalFonts, loadImage, type FontKey } from '@napi-rs/canvas';
+import { fileURLToPath } from 'node:url';
+import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const { addRepresentation, icon } = vi.hoisted(() => {
@@ -13,24 +11,19 @@ vi.mock('electron', () => ({ nativeImage: { createEmpty: () => icon } }));
 import { createWindowsBadgeIcon, renderWindowsBadgePng } from '../windowsBadgeIcon';
 
 describe('Windows numeric taskbar badge', () => {
-  let fontDirectory: string | undefined;
-  let fontKey: FontKey | null = null;
-
+  let fixtureFont: ReturnType<typeof GlobalFonts.registerFromPath> = null;
   beforeAll(() => {
-    if (process.platform !== 'linux') return;
-    // Linux does not ship Segoe UI. Pin the test's substitute before the first
-    // render instead of depending on the runner image's native font fallback.
-    // Use a unique path so cleanup cannot unregister a shared system font.
-    fontDirectory = mkdtempSync(join(tmpdir(), 'cindy-badge-font-'));
-    const fontPath = join(fontDirectory, 'DejaVuSans-Bold.ttf');
-    copyFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', fontPath);
-    fontKey = GlobalFonts.registerFromPath(fontPath, 'Segoe UI');
-    expect(fontKey).not.toBeNull();
+    // Keep the PNG assertions independent of the runner's system-font fallback.
+    // This checks real badge rendering, not the Windows Segoe UI glyph shapes.
+    fixtureFont = GlobalFonts.registerFromPath(
+      fileURLToPath(new URL('../../../native/menubar/BarlowCondensed-SemiBold.ttf', import.meta.url)),
+      'Segoe UI',
+    );
+    expect(fixtureFont).not.toBeNull();
   });
-
   afterAll(() => {
-    if (fontKey) GlobalFonts.remove(fontKey);
-    if (fontDirectory) rmSync(fontDirectory, { recursive: true, force: true });
+    // The native font collection is process-wide, including Vitest threads.
+    if (fixtureFont) GlobalFonts.remove(fixtureFont);
   });
 
   it.each([1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 8])(
