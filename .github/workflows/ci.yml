@@ -459,6 +459,15 @@ jobs:
           fetch-depth: 0
           lfs: true
 
+      # Compile the real EXE and N-API library so shared Windows API feature
+      # requirements fail in required CI, not only during installer packaging.
+      # Match packaging's isolated output directories: EXE and library share a PDB name.
+      - name: Build Windows remote desktop host EXE
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --config apps/desktop/native/remote-desktop/.cargo/config.toml --manifest-path apps/desktop/native/remote-desktop/windows-host/Cargo.toml --target-dir apps/desktop/native/remote-desktop/windows-host/target/bin --bin cindy-windows-desktop-host
+
+      - name: Build Windows remote desktop host library
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --config apps/desktop/native/remote-desktop/.cargo/config.toml --manifest-path apps/desktop/native/remote-desktop/windows-host/Cargo.toml --target-dir apps/desktop/native/remote-desktop/windows-host/target/addon --lib
+
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
