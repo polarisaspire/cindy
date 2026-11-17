@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   failTest: 0,
   signals: [] as number[],
   masterPid: '123',
+  containerMaster: false,
   crashAt: '',
   crashBefore: false,
   crashed: false,
@@ -24,6 +25,7 @@ vi.mock('node:fs', () => ({
   default: {
     statSync: (file: string) => {
       if (h.crashed) throw new Error('simulated process termination');
+      if (file === '/' || /^\/proc\/\d+\/root$/.test(file)) return { dev: 1, ino: file.includes('/789/') ? 2 : 1 };
       if (!h.files.has(file)) throw missing();
       return {
         size: Buffer.byteLength(h.files.get(file)!),
@@ -60,8 +62,8 @@ vi.mock('node:fs', () => ({
       if (h.crashed) throw new Error('simulated process termination');
       for (const key of h.files.keys()) if (key === file || (options?.recursive && key.startsWith(`${file}/`))) h.files.delete(key);
     },
-    readdirSync: () => [h.masterPid],
-    readlinkSync: () => '/usr/sbin/nginx',
+    readdirSync: () => [h.masterPid, ...(h.containerMaster ? ['789'] : [])],
+    readlinkSync: (file: string) => file.endsWith('/ns/net') ? 'net:[host]' : '/usr/sbin/nginx',
   },
 }));
 vi.mock('node:child_process', () => ({
@@ -132,6 +134,7 @@ beforeEach(() => {
   ]);
   h.tests = 0;
   h.masterPid = '123';
+  h.containerMaster = false;
   h.failTest = 0;
   h.signals = [];
   h.crashAt = '';
@@ -149,6 +152,42 @@ beforeEach(() => {
   });
 });
 afterEach(() => vi.unstubAllGlobals());
+
+// Regression: container and host Nginx coexist; legacy Cindy routes have no transaction metadata.
+it("ignores a container Nginx while preparing the native site", () => {
+  h.containerMaster = true;
+  h.files.set(
+    "/proc/789/cmdline",
+    "nginx: master process nginx -g daemon off;",
+  );
+  prepare(true);
+  expect(h.signals).toEqual([123]);
+  expect(h.files.get(site)).toContain("proxy_pass http://127.0.0.1:47821;");
+});
+
+it.each([false, true])(
+  "adopts only an unchanged legacy Cindy proxy and preserves rollback (modified=%s)",
+  (modified) => {
+    prepare(true);
+    let legacy = h.files.get(site)!.replace(/location \^~ \/api\/agent-net\/ \{[^{}]*\}\n?/, '');
+    if (modified)
+      legacy = legacy.replace("proxy_buffering off;", "proxy_buffering on;");
+    h.files.set(site, legacy);
+    h.files.set(main, originalMain);
+    for (const file of [...h.files.keys()])
+      if (file.startsWith(`${root}/`)) h.files.delete(file);
+    if (modified) {
+      expect(() => prepare(true)).toThrow("already serves");
+    } else {
+      prepare(true);
+      expect(
+        h.files.get(site)!.match(/location \^~ \/api\/device-link\//g),
+      ).toHaveLength(1);
+      manageNginx("rollback");
+    }
+    expect(h.files.get(site)).toBe(legacy);
+  },
+);
 
 it('preserves the original website and ACME webroot through certificate rotation, upgrade and removal', () => {
   const prepared = prepare();
