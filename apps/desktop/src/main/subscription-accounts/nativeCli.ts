@@ -79,7 +79,7 @@ export async function readNativeAccount(
   provider: SubscriptionProvider,
   directory: string,
   options?: { force?: boolean },
-): Promise<AuthState & { plan?: string; loginExpiresAt?: string }> {
+): Promise<AuthState & { plan?: string; planTier?: string; planType?: string; loginExpiresAt?: string }> {
   if (provider === 'anthropic') {
     const result = await refreshClaudeCliLoginStatus({
       configDir: directory === path.join(homedir(), '.claude') ? undefined : directory,
@@ -90,6 +90,7 @@ export async function readNativeAccount(
       identity: result.email,
       authSource: 'oauth',
       plan: result.subscriptionType,
+      planTier: result.planTier,
       ...(result.loginExpiresAt ? { loginExpiresAt: result.loginExpiresAt } : {}),
     };
   }
@@ -101,6 +102,7 @@ export async function readNativeAccount(
     authenticated: result.account?.type === 'chatgpt',
     identity: result.account?.email,
     plan: result.account?.planType,
+    planType: result.account?.planType,
     authSource: 'oauth',
     // The CLI can hide an existing ChatGPT login when its active provider owns
     // authentication. Repeating login cannot make that provider expose the account.
