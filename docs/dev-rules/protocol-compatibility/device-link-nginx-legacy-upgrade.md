@@ -7,4 +7,3 @@ Nginx 部署核对 master 的实际根目录与网络命名空间，容器内的
 一致的回环 HTTP 路由和专用 502 fallback；自定义过的路由仍拒绝接管。证书、站点其余配置、
 主人身份及设备登记不重建，迁移保留 prepare/rollback 的逆补丁。验证覆盖见
 `packages/device-link-relay/src/__tests__/nginx.test.ts`；此修复不改变跨端线协议。
-

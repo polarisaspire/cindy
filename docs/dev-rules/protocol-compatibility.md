@@ -120,8 +120,6 @@ Ghost manifest、自建中转同步维护与 Review 清单。每项具体能力�
 
 ## 自建中转同步维护
 
-Nginx 发现与旧代理升级见[兼容记录](protocol-compatibility/device-link-nginx-legacy-upgrade.md)。
-
 **硬性要求：凡 Device Link 的改动会影响自建中转，必须在同一次改动中完成必要的同步适配、
 兼容处理与验证。缺少这些内容视为未完成，不得只完成官方中转路径后把自建中转留到后续。**
 
