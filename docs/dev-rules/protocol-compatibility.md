@@ -120,11 +120,7 @@ Ghost manifest、自建中转同步维护与 Review 清单。每项具体能力�
 
 ## 自建中转同步维护
 
-Nginx 部署核对 master 的实际根目录与网络命名空间，容器内的 Nginx 不作为宿主实例参与
-接管，宿主 systemd 的挂载隔离仍受支持。升级没有部署事务记录的旧 Cindy 反向代理时，只迁移与旧模板结构完全
-一致的回环 HTTP 路由和专用 502 fallback；自定义过的路由仍拒绝接管。证书、站点其余配置、
-主人身份及设备登记不重建，迁移保留 prepare/rollback 的逆补丁。验证覆盖见
-`packages/device-link-relay/src/__tests__/nginx.test.ts`；此修复不改变跨端线协议。
+Nginx 发现与旧代理升级见[兼容记录](protocol-compatibility/device-link-nginx-legacy-upgrade.md)。
 
 **硬性要求：凡 Device Link 的改动会影响自建中转，必须在同一次改动中完成必要的同步适配、
 兼容处理与验证。缺少这些内容视为未完成，不得只完成官方中转路径后把自建中转留到后续。**
