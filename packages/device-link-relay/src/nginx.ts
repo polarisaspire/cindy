@@ -279,6 +279,43 @@ function location(port: number, tls: boolean): string {
 }`;
 }
 
+function withoutLegacyRelay(body: string): string {
+  const directives = parse("body", body);
+  const route = directives.find(
+    (d) => d.name === "location" && d.args.join(" ") === `^~ ${API}`,
+  );
+  const fallback = directives.find(
+    (d) =>
+      d.name === "location" && d.args.join(" ") === "@cindy_relay_unavailable",
+  );
+  const upstream = route?.children?.find((d) => d.name === "proxy_pass")
+    ?.args[0];
+  const match = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(upstream ?? "");
+  if (
+    !route ||
+    !fallback ||
+    !match ||
+    Number(match[1]) < 1 ||
+    Number(match[1]) > 65535
+  )
+    return body;
+  const shape = (d: Directive): unknown => [
+    d.name,
+    d.args,
+    d.children?.map(shape),
+  ];
+  const expected = parse("legacy", location(Number(match[1]), false));
+  if (
+    JSON.stringify(shape(route)) !== JSON.stringify(shape(expected[0])) ||
+    JSON.stringify(shape(fallback)) !==
+      JSON.stringify(shape(expected[expected.length - 1]))
+  )
+    return body;
+  for (const d of [route, fallback].sort((a, b) => b.start - a.start))
+    body = body.slice(0, d.start) + body.slice(d.end);
+  return body;
+}
+
 /** 从实际启用的文件生成最小补丁。before/after 也是卸载时的逆补丁，不还原整份旧文件覆盖用户后续修改。 */
 export function planNginx(options: {
   main: string;
@@ -344,6 +381,7 @@ export function planNginx(options: {
     });
   };
   const routeApi = (body: string, tls: boolean): string => {
+    body = withoutLegacyRelay(body);
     body = body.replaceAll(`if ($uri !~ "^${CHALLENGE}")`, 'if ($uri !~ "^/(?:api/(?:device-link|agent-net)/|[.]well-known/acme-challenge/)")');
     const directives = parse('body', body);
     if (directives.some((d) => d.name === 'location' && d.args.some((a) => a.startsWith(API) || a === '/api/device-link' || a.startsWith('/api/agent-net')))) {
@@ -565,24 +603,46 @@ function run(binary: string, args: string[]): string {
 
 function discover(): NginxInstance {
   const instances: NginxInstance[] = [];
-  for (const entry of fs.readdirSync('/proc').filter((e) => /^\d+$/.test(e))) {
+  for (const entry of fs.readdirSync("/proc").filter((e) => /^\d+$/.test(e))) {
     let title: string;
     try {
-      title = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+      title = fs
+        .readFileSync(`/proc/${entry}/cmdline`, "utf8")
+        .replace(/\0/g, " ")
+        .trim();
     } catch {
       continue;
     }
-    if (!title.startsWith('nginx: master process ')) continue;
-    const binary = fs.readlinkSync(`/proc/${entry}/exe`);
+    if (!title.startsWith("nginx: master process ")) continue;
+    let binary: string;
+    try {
+      // systemd may isolate native Nginx mounts (PrivateTmp/ProtectSystem).
+      // Compare the actual root and network, not the mount namespace itself.
+      const root = fs.statSync("/");
+      const processRoot = fs.statSync(`/proc/${entry}/root`);
+      if (
+        root.dev !== processRoot.dev ||
+        root.ino !== processRoot.ino ||
+        fs.readlinkSync(`/proc/${entry}/ns/net`) !==
+          fs.readlinkSync("/proc/self/ns/net")
+      )
+        continue;
+      binary = fs.readlinkSync(`/proc/${entry}/exe`);
+    } catch {
+      continue; // The process may have exited during discovery.
+    }
     const args: string[] = [];
     // -c/-p are paths; flags injected with -g are deliberately not executed as shell text.
-    for (const flag of ['-c', '-p']) {
-      const match = new RegExp(`(?:^|\\s)${flag}\\s+(?:"([^"]+)"|'([^']+)'|(\\S+))`).exec(title);
+    for (const flag of ["-c", "-p"]) {
+      const match = new RegExp(
+        `(?:^|\\s)${flag}\\s+(?:"([^"]+)"|'([^']+)'|(\\S+))`,
+      ).exec(title);
       if (match) args.push(flag, match[1] ?? match[2] ?? match[3]);
     }
     instances.push({ binary, args, pid: Number(entry) });
   }
-  if (instances.length !== 1) throw new Error('Exactly one native Nginx master process is required');
+  if (instances.length !== 1)
+    throw new Error("Exactly one native Nginx master process is required");
   return instances[0];
 }
 
