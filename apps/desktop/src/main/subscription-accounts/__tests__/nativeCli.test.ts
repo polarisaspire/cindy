@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   hold: false,
   accountResult: undefined as unknown,
   oldAuthenticated: false,
+  oldReason: 'oauth_expired',
   oldLogin: vi.fn<(...args: unknown[]) => Promise<{ ok: boolean; reason?: string }>>(async () => ({ ok: true })),
   oldCancel: vi.fn(),
 }));
@@ -29,7 +30,7 @@ vi.mock('@cindy/maker-core', () => ({
 }));
 vi.mock('../../agent-binaries/index.js', () => ({ getReadyBinaryPath: () => h.binary }));
 vi.mock('../../maker-host/codex-account-auth.desktop.js', () => ({
-  codexAccountState: () => ({ authenticated: h.oldAuthenticated, errorReason: h.oldAuthenticated ? undefined : 'oauth_expired' }),
+  codexAccountState: () => ({ authenticated: h.oldAuthenticated, errorReason: h.oldAuthenticated ? undefined : h.oldReason }),
   loginCodexAccount: h.oldLogin,
   cancelCodexAccountLogin: h.oldCancel,
 }));
@@ -48,6 +49,7 @@ import {
   readLegacyCodexProviderAccount,
   loginLegacyCodexProviderAccount,
 } from '../nativeCli.js';
+import { isAccountServiceUnreachable } from '../accountServiceError.js';
 import { refreshClaudeCliLoginStatus, runClaudeCliLogin } from '../../maker-host/claude-native-cli.desktop.js';
 
 const children: (EventEmitter & {
@@ -132,6 +134,7 @@ beforeEach(() => {
   h.hold = false;
   h.accountResult = undefined;
   h.oldAuthenticated = false;
+  h.oldReason = 'oauth_expired';
   h.oldLogin.mockReset().mockResolvedValue({ ok: true });
   h.oldCancel.mockReset();
   children.length = 0;
@@ -250,6 +253,17 @@ describe('official Codex profiles', () => {
     expect(h.spawn.mock.calls[0][2].env.CODEX_HOME).toBe('/fixture/imported');
   });
 
+  // 2026-11-18 personal restart, unit: an interrupted task's automatic resume failed with
+  // "requires login" because the account was read before custom providers reached the catalog.
+  // Entry: readLegacyCodexProviderAccount, whose rejection the pool caches for seconds as
+  // unavailable (runtime.test "re-reads a failed account snapshot"); a returned signed-out state
+  // is cached for 30 s as LOGIN_REQUIRED. Minimal input: catalog lookup reports provider_unavailable.
+  it('reports a connection missing from the catalog as a failed read, not a signed-out account', async () => {
+    h.oldReason = 'provider_unavailable';
+    await expect(readLegacyCodexProviderAccount('openai-old', '/fixture/imported')).rejects.toThrow('not loaded');
+    expect(h.spawn).not.toHaveBeenCalled();
+  });
+
   it('uses the original login cancellation path for an imported connection', async () => {
     const controller = new AbortController();
     h.oldLogin.mockImplementation(async (_id, isCurrent) => {
@@ -344,14 +358,40 @@ describe('official Codex profiles', () => {
     );
     expect(children[0].kill).toHaveBeenCalledTimes(1);
   });
+  // 2026-11-18 user report, unit: Codex answered `workspace routing discovery timed out` because
+  // chatgpt.com resolved to a wrong address. It surfaced as a generic failure, so a valid login
+  // looked lost. The earlier case only covers a non-network error. Classify, never forward text.
+  it.each([
+    { message: 'workspace routing discovery timed out', unreachable: true },
+    { message: 'error sending request for url (https://chatgpt.com/backend-api/x)', unreachable: true },
+    { message: 'fixture-secret-must-not-leak', unreachable: false },
+  ])('classifies a CLI account error as unreachable=$unreachable', async ({ message, unreachable }) => {
+    h.error = true;
+    h.errorMessage = message;
+    const error = await codexAccountRpc('/fixture/second', 'account/read', {}).catch((e: unknown) => e);
+    expect(isAccountServiceUnreachable(error)).toBe(unreachable);
+    expect((error as Error).message).toBe('Codex account request failed');
+  });
+
+  // Same report: the browser login finished, then its confirming read hit the network failure and
+  // the whole sign-in was reported as failed. The caller re-reads and shows the account as unknown.
+  it('does not fail a finished browser login when only the confirming read is unreachable', async () => {
+    h.error = true;
+    h.errorMessage = 'workspace routing discovery timed out';
+    await expect(loginNativeAccount('openai', '/fixture/second', new AbortController().signal)).resolves.toBeUndefined();
+    h.errorMessage = 'fixture-secret-must-not-leak';
+    await expect(loginNativeAccount('openai', '/fixture/second', new AbortController().signal))
+      .rejects.toThrow('Codex account request failed');
+  });
+
   it('bounds a stalled CLI read and cancels a browser login without querying another profile', async () => {
     vi.useFakeTimers();
     h.hold = true;
-    const pending = expect(codexAccountRpc('/fixture/second', 'account/read', {})).rejects.toThrow(
-      'timed out',
-    );
+    const pending = codexAccountRpc('/fixture/second', 'account/read', {}).catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(15_000);
-    await pending;
+    const stalled = await pending;
+    expect((stalled as Error).message).toMatch('timed out');
+    expect(isAccountServiceUnreachable(stalled)).toBe(true);
     const abort = new AbortController();
     const login = expect(
       loginNativeAccount('openai', '/fixture/second', abort.signal),
