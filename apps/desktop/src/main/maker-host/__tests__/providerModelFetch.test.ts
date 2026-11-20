@@ -214,7 +214,7 @@ describe('import discovery limits', () => {
       expect(init?.redirect).toBe('error');
       return fakeResponse(200, JSON.stringify({ name: 'magpie' }));
     });
-    expect(result).toEqual({ ok: true, models: [] });
+    expect(result).toEqual({ ok: true, models: [], complete: true });
   });
 
   it.each([
@@ -249,7 +249,7 @@ describe('import discovery limits', () => {
       expect(new Headers(init?.headers).get('authorization')).toBe('Bearer sk-test');
       return fakeResponse(200, JSON.stringify({ object: 'list', data: [] }));
     });
-    expect(result).toEqual({ ok: true, models: [] });
+    expect(result).toEqual({ ok: true, models: [], complete: true });
   });
 
   it.each([{}, { data: [{}] }, { data: [null] }, { data: [{ id: '' }] }, { models: [] },
@@ -638,6 +638,8 @@ describe('fetchProviderModels', () => {
   it('accepts a complete empty refresh but rejects malformed rows', async () => {
     expect(await fetchProviderModels(spec({ allowEmpty: true }), async () =>
       fakeResponse(200, '{"data":[]}'))).toMatchObject({ ok: true, models: [] });
+    expect(await fetchProviderModels(spec({ allowEmpty: true }), async () =>
+      fakeResponse(200, '{"data":[],"error":{"message":"Unauthorized"}}'))).toMatchObject({ ok: false });
     for (const data of [[{}], ['valid', {}]]) {
       expect(await fetchProviderModels(spec({ allowEmpty: true }), async () =>
         fakeResponse(200, JSON.stringify({ data })))).toMatchObject({ ok: false });
@@ -673,6 +675,22 @@ describe('fetchProviderModels', () => {
   it('does not withdraw OpenRouter speech models when the speech catalog fails', async () => {
     const result = await fetchProviderModels(spec({ allowEmpty: true, baseUrl: 'https://openrouter.ai/api/v1' }),
       async url => String(url).includes('output_modalities') ? fakeResponse(503, '{}') : fakeResponse(200, '{"data":["chat"]}'));
+    expect(result.ok).toBe(false);
+  });
+
+  // #14: a complete chat directory is not enough when the OpenRouter speech
+  // view advertises another page. The saved refresh must not consume that subset.
+  it('requires complete OpenRouter speech pagination before replacing membership', async () => {
+    const result = await fetchProviderModels(spec({ allowEmpty: true, baseUrl: 'https://openrouter.ai/api/v1' }),
+      async url => {
+        const search = new URL(String(url)).searchParams;
+        if (!search.has('output_modalities')) return fakeResponse(200, '{"data":["chat"]}');
+        if (search.has('cursor')) return fakeResponse(503, '{}');
+        return fakeResponse(200, JSON.stringify({
+          data: [{ id: 'voice', architecture: { output_modalities: ['speech'] } }],
+          next_cursor: 'next',
+        }));
+      });
     expect(result.ok).toBe(false);
   });
 

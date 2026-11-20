@@ -1,3 +1,4 @@
+import type { ProviderErrorCode } from '../../../shared/providerErrors';
 import { useRemoteProviderDisable } from '@/lib/remoteProviderDisable';
 import { Select } from '@/components/ui/select';
 import { duplicateSubscriptionProviders, listedSourceFolds } from '@cindy/model-providers';
@@ -33,7 +34,7 @@ import { providerWeeklyQuotaSource } from '../new-chat/useProviderWeeklyQuota';
  *   - Anthropic: maker.claudeOAuth*;OpenAI: useCodexAuth();xAI: maker.xaiOAuth*。
  *   - XD 网关: 凭据由 model-access 自动下发(useModelAccessStatus;无手填入口)。
  *   - 自定义供应商: CRUD IPC + safeStorage 密钥;「刷新模型」= 读回密钥后走
- *     fetchProviderModels,additions-only 合并进配置(与 OAuth 动态发现同语义)。
+ *     fetchProviderModels，只有完整响应才同步该 runtime 名单。
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -141,7 +142,6 @@ import { ProviderShareEntryButton } from '@/features/provider-share/ProviderShar
 import { useLocalProviderGroupsState } from '@/features/provider-group/useLocalProviderGroups';
 import { ProviderShareManagePage } from '@/features/provider-share/ProviderShareManagePage';
 import { ProviderSharePasteButton } from '@/features/provider-share/ProviderSharePasteDialog';
-import { useOwnedProviderShares } from '@/features/provider-share/useOwnedProviderShares';
 import {
   ProviderShareReceivedDetail,
   ProviderShareReceivedRailGroup,
@@ -929,7 +929,7 @@ function DetailHeader({
                     </DropdownMenuItem>
                   )}
                   {menuItems}
-                  <DropdownMenuItem
+                  {provider.geminiImageSettingsConnectionId === undefined && <DropdownMenuItem
                     onClick={() =>
                       writeProviderDisabled(
                         provider.id,
@@ -943,7 +943,7 @@ function DetailHeader({
                         ? 'settings.providers.menu.enableProvider'
                         : 'settings.providers.menu.disableProvider',
                     )}
-                  </DropdownMenuItem>
+                  </DropdownMenuItem>}
                   {menuFooter}
                   {resolvedDelete && (
                     <>
@@ -2687,11 +2687,10 @@ export function ProvidersSection() {
     ? receivedShares.find((share) => share.shareId === selectedShareId) ?? null
     : null;
   const providerGroups = useLocalProviderGroupsState();
-  const { entries: offeredRemoteProviders, hiddenShareIds: groupedShareIds } = useOwnRemoteProviderList();
+  const { entries: offeredRemoteProviders, hiddenShareIds: groupedShareIds, ownedShares } = useOwnRemoteProviderList();
   const remoteDisable = useRemoteProviderDisable();
   const ownRemoteProviders = useMemo(() => offeredRemoteProviders.map(entry => remoteDisable.isDisabled(entry.deviceId, entry.provider.id)
     ? { ...entry, provider: { ...entry.provider, suspended: true } } : entry), [offeredRemoteProviders, remoteDisable]);
-  const ownedShares = useOwnedProviderShares(ownRemoteProviders.map(entry => entry.deviceId));
   const selectedRemote = selectedRemoteKey
     ? ownRemoteProviders.find((entry) => entry.key === selectedRemoteKey) ?? null
     : null;
@@ -2804,6 +2803,8 @@ export function ProvidersSection() {
     providers.forEach((p) => map.set(p.id, p));
     return map;
   }, [providers]);
+  const geminiImages = byId.get('gemini');
+  const geminiImageConnectionId = geminiImages?.geminiImageSettingsConnectionId;
 
   // 共享 provider 快照保持目录原序，避免显示偏好影响模型来源推导；只有设置页左栏
   // 应用 Main 并列下发的 owner-scoped 显示顺序。Cindy 登录引导与检测建议是伪行，
@@ -2847,6 +2848,7 @@ export function ProvidersSection() {
         (p.id === MANAGED_OLLAMA_PROVIDER_ID ||
           p.id === MANAGED_LLAMACPP_PROVIDER_ID ||
           p.id === MANAGED_LMSTUDIO_PROVIDER_ID ||
+          p.id === geminiImageConnectionId ||
           providerHasModels(p) ||
           // Suspension gates actions, not the empty connection's enable entry.
           !!providerSpeechSetup({ ...p, suspended: false }) ||
@@ -2856,7 +2858,7 @@ export function ProvidersSection() {
       }
     }
     return rows;
-  }, [providers, openaiReconnectRequired, borrowableIds, ownedShares]);
+  }, [providers, openaiReconnectRequired, borrowableIds, ownedShares, geminiImageConnectionId]);
 
   const orderedVisibleProviders = useMemo(
     () => applyProviderOrder(visibleProviders, providerOrder),
@@ -3135,6 +3137,11 @@ export function ProvidersSection() {
         }
       : selected;
   }, [selectedId, listProviders, codexAuth.state, openaiPoolState, dataOwnerId]);
+  const managesGeminiImages = effectiveSelected?.source === 'user' &&
+    effectiveSelected.id === geminiImageConnectionId && (geminiImages?.imageModels?.length ?? 0) > 0;
+  const modelsProvider = effectiveSelected?.id === 'gemini' && geminiImageConnectionId !== undefined
+    ? { ...effectiveSelected, imageModels: undefined }
+    : effectiveSelected;
   const selectedAccountRoot = effectiveSelected ? localDuplicates.get(effectiveSelected.id) ?? effectiveSelected.id : null;
   const selectedAccountConnections = listProviders.filter(provider => provider.id === selectedAccountRoot || localDuplicates.get(provider.id) === selectedAccountRoot);
   const selectedBorrow = useProviderBorrow(effectiveSelected);
@@ -3183,7 +3190,7 @@ export function ProvidersSection() {
 
   /**
    * 自定义供应商「刷新模型」:读回各 runtime 密钥 → fetchProviderModels →
-   * 成功响应决定对应 runtime 的成员，保留仍在名单内型号的显式设置。
+   * 成功且完整的响应决定对应 runtime 的成员，保留仍在名单内型号的显式设置。
    * 失败保留原名单；不把公共参考型号补进端点实报的名单。
    */
   const handleRefreshModels = useCallback(
@@ -3192,7 +3199,7 @@ export function ProvidersSection() {
       try {
         const config = providerViewToCustomProviderConfig(p);
         let added = 0;
-        let discoveryFailed = false;
+        let failureCode: ProviderErrorCode | undefined;
         const refreshedAgents = new Set<AgentKind>();
         const batch = await fetchCustomProviderModelsForRefresh(p, config);
         for (const agent of p.agents) {
@@ -3213,8 +3220,11 @@ export function ProvidersSection() {
             savedProviderId: p.id,
             allowEmpty: true,
           });
-          if (!r.ok || !r.models) {
-            discoveryFailed = true;
+          if (!r.ok || !r.models || (!p.auth.native && r.complete !== true)) {
+            // Preserve the runtime on partial/unknown replies; only definitive
+            // complete responses may replace the saved membership (fork #14).
+            const code = r.code ?? 'UNKNOWN';
+            if (!failureCode || failureCode === 'UNKNOWN' || code === 'AUTH_INVALID') failureCode = code;
             continue;
           }
           if (p.auth.native) {
@@ -3235,12 +3245,16 @@ export function ProvidersSection() {
           added += merged.addedIds.length;
         }
         if (!refreshedAgents.size) {
-          toast.error(t('settings.providers.models.refreshFailed'));
+          toast.error(t(failureCode === 'AUTH_INVALID' && p.auth.method === 'oauth'
+            ? 'settings.providers.models.refreshReconnect'
+            : failureCode && failureCode !== 'UNKNOWN'
+              ? `providerError.${failureCode}`
+              : 'settings.providers.models.refreshFailed'));
           return;
         }
         const saved = await confirmProviderChange(options => updateCustomProvider(config, {}, options));
         if (!saved) return;
-        if (discoveryFailed) {
+        if (failureCode) {
           toast.error(t('settings.providers.models.refreshFailed'));
         } else if (added > 0) {
           toast.success(t('settings.providers.models.refreshAdded', { count: added }));
@@ -3640,7 +3654,7 @@ export function ProvidersSection() {
                   {/* 供应商已停用:条带讲清「发生了什么 + 下一步」并就地给恢复入口。整个
                     模型区随之收起(2026-07-28 用户反馈:停用了就别再列模型)——停用是
                     盖在上面的一层,凭证与逐模型配置不丢,启用即原样回来。 */}
-                  {effectiveSelected.suspended && (
+                  {effectiveSelected.suspended && effectiveSelected.geminiImageSettingsConnectionId === undefined && (
                     <div
                       className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-13"
                       style={{ borderColor: 'var(--settings-theme-card-border)' }}
@@ -3720,7 +3734,8 @@ export function ProvidersSection() {
                   )}
                   {!effectiveSelected.suspended &&
                     !selectedBorrowedModels &&
-                    (providerHasModels(effectiveSelected) ||
+                    modelsProvider &&
+                    (providerHasModels(modelsProvider) ||
                       isCustomRoutedProvider(effectiveSelected) ||
                       (isBuiltinRefreshableProviderId(effectiveSelected.id) &&
                         !effectiveSelected.modelDiscoveryFailure) ||
@@ -3734,7 +3749,7 @@ export function ProvidersSection() {
                           />
                         )}
                         <UnifiedModelList
-                          provider={selectedBorrow.borrowed ? { ...effectiveSelected, connected: true } : effectiveSelected}
+                          provider={selectedBorrow.borrowed ? { ...modelsProvider, connected: true } : modelsProvider}
                           onAddSpeechModels={providerSpeechSetup(effectiveSelected) ? () => {
                             setSpeechProvider({ provider: effectiveSelected, owner: dataOwnerId, generation: ownerGeneration });
                           } : undefined}
@@ -3783,6 +3798,40 @@ export function ProvidersSection() {
                     )}
                   {!effectiveSelected.suspended &&
                     !selectedBorrowedModels &&
+                    managesGeminiImages && geminiImages && (
+                      <>
+                        {geminiImages.suspended && (
+                          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-5 py-3 text-13"
+                            style={{ borderColor: 'var(--settings-theme-card-border)' }}>
+                            <span style={{ color: 'var(--text-tertiary)' }}>
+                              {t('newChat.modelSelector.category.image')} · {t('settings.providers.pill.suspended')}
+                            </span>
+                            <PillButton
+                              label={t('settings.providers.button.enableProvider')}
+                              onClick={() => writeProviderDisabled(
+                                geminiImages.id, false, t('settings.providers.models.accessWriteFailed'),
+                              )}
+                            />
+                          </div>
+                        )}
+                        <UnifiedModelList
+                          key={effectiveSelected.id + ':gemini-images'}
+                          provider={{
+                            ...geminiImages,
+                            // Visibility and disable preferences belong to the existing image route.
+                            connected: effectiveSelected.connected,
+                            availableMediaModelIds: effectiveSelected.connected ? geminiImages.availableMediaModelIds : [],
+                            models: {},
+                            videoModels: undefined,
+                            audioModels: undefined,
+                            embeddingModels: undefined,
+                          }}
+                        />
+                      </>
+                    )}
+                  {!effectiveSelected.suspended &&
+                    !selectedBorrowedModels &&
+                    !managesGeminiImages &&
                     !providerHasModels(effectiveSelected) &&
                     !isCustomRoutedProvider(effectiveSelected) &&
                     !isManagedLocalProvider(effectiveSelected.id) &&

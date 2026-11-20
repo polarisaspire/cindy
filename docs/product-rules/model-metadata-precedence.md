@@ -188,6 +188,13 @@ Pi 已识别的 OpenAI 订阅连接之间可复用同一运行时：每个账号
 | `modelRegistry.localModels` | 整个本地域缺失时用随包本地域 | 显式空 models 撤下候选；空 featuredIds 撤下推荐；不删除本机已安装模型 |
 
 发现失败不能伪装成成功空列表。缓存保留、清空与账号切换由各发现适配器控制，不能统一用一个空数组处理。
+
+本 fork 保留 #14 的设置页手动同步：每个 runtime 单独判断；仅 `complete: true` 才以该次端点名单同步，
+即便接口完整返回空名单；任一 runtime 拉取失败、完整性未知或不完整，保留其原名单并报告失败。
+翻页失败、不可信下一页、循环、条数或页数上限、异常清单成员、未跟随分页提示和 OpenRouter 语音目录未读全
+都不能作为移除依据。自定义连接手动同步与授权后的自动发现不同，自动发现仍只新增。设置页手动刷新不自动
+补语音参考，也不使用上游 #11550 的二次勾选清理流程；仍可手动添加参考型号。
+
 实现入口：[活动目录](../../apps/desktop/src/main/maker-host/active-catalog.ts)、
 [媒体投影](../../packages/model-providers/src/providerMediaModels.ts)、
 [自定义发现合并](../../packages/model-providers/src/modelMetadataLayers.ts)。
