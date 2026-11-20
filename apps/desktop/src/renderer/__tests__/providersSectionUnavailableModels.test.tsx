@@ -819,7 +819,7 @@ describe('ProvidersSection — 双栏管理', () => {
       { id: 'new-model', name: 'New', discoveredMetadata: { nativeApi: 'openai-responses' } },
       { id: 'chat-model', name: 'Chat', discoveredMetadata: { nativeApi: 'openai-completions' } },
     ] }));
-    if (id === 'openrouter-retry') fetchModels.mockResolvedValueOnce({ ok: false, models: [] });
+    if (id === 'openrouter-retry') fetchModels.mockResolvedValueOnce({ ok: false, complete: false, models: [] });
     Object.assign(window.electronAPI.maker, { fetchProviderModels: fetchModels });
     if (id === 'openrouter-reconnected') providerSnapshotState.customOverride.connected = false;
     const view = render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
