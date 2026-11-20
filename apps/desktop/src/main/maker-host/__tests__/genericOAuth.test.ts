@@ -220,6 +220,16 @@ describe('manual model refresh for saved OAuth providers', () => {
     });
   }
 
+  // #14 applies to saved custom OAuth routes as well. The old request omitted
+  // allowEmpty and misclassified a legitimate empty directory as a failure.
+  it('accepts complete empty membership for a user-requested saved refresh', async () => {
+    const provider = savedProvider('nous');
+    seedBlob('scoped-account', { access_token: 'fake-oauth-access' });
+    const result = await fetchSavedOAuthProviderModels(provider, 'pi', 'scoped-account', () => true,
+      async () => new Response('{"data":[]}'), undefined, true);
+    expect(result).toMatchObject({ ok: true, complete: true, models: [] });
+  });
+
   it('renews an expiring login before fetching the model list', async () => {
     const provider = savedProvider('nous');
     seedBlob('scoped-account', { access_token: 'fake-expired', refresh_token: 'fake-refresh', expires_at: nowMs + 1000 });

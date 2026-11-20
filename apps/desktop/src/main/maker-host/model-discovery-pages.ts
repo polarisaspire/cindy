@@ -1,5 +1,43 @@
 import { isOpenRouterModelsUrl, mergeModelMetadata, parseModelsListResponse, type DiscoveredModel } from '@cindy/model-providers';
 
+/**
+ * A collected catalog plus whether every advertised page was actually read.
+ * Partial catalogs stay usable for additions; only a complete one may suggest
+ * that a missing model was withdrawn upstream (#11298).
+ */
+export interface CollectedModelDiscoveryPages {
+  models: DiscoveredModel[] | null;
+  complete: boolean;
+}
+
+/**
+ * Pagination hints this collector does not follow. Seeing one means more pages may
+ * exist, so the catalog must not be treated as complete (#11298 review). Deliberately
+ * generic: any next/has-more/cursor/page-token field, a page count above one, or a
+ * total above what was collected, at the top level or inside a pagination object.
+ */
+const NEXT_HINT = /^(next.*|has_?(more|next).*|.*cursor.*|.*page_?token.*)$/i;
+const PAGE_COUNT = /^(total_?pages|page_?count|pages|last_?page|num_?pages)$/i;
+const TOTAL = /^(total|total_?count|total_?items|total_?results|count_?total)$/i;
+const CURRENT_PAGE = /^(current_?page|page|page_?number)$/i;
+function hasUnfollowedPagination(data: Record<string, unknown>, collected: number): boolean {
+  const present = (value: unknown) => value !== undefined && value !== null && value !== '' && value !== false && value !== 0;
+  const scan = (node: Record<string, unknown>, depth: number): boolean => {
+    const current = Object.entries(node).find(([key, value]) => CURRENT_PAGE.test(key) && typeof value === 'number');
+    const currentPage = typeof current?.[1] === 'number' ? current[1] : 1;
+    for (const [key, value] of Object.entries(node)) {
+      if (depth === 0 && (key === 'data' || key === 'models')) continue;
+      if (NEXT_HINT.test(key) && present(value)) return true;
+      if (PAGE_COUNT.test(key) && typeof value === 'number' && value > currentPage) return true;
+      if (TOTAL.test(key) && typeof value === 'number' && Number.isFinite(value) && value > collected) return true;
+      if (depth < 2 && value && typeof value === 'object' && !Array.isArray(value)
+        && scan(value as Record<string, unknown>, depth + 1)) return true;
+    }
+    return false;
+  };
+  return scan(data, 0);
+}
+
 /** Follow catalog cursors only on the original endpoint. Never forward credentials to a next-link host. */
 export async function collectModelDiscoveryPages(
   first: unknown,
@@ -7,6 +45,15 @@ export async function collectModelDiscoveryPages(
   fetchPage: (url: string) => Promise<unknown>,
   options: { requireComplete?: boolean } = {},
 ): Promise<DiscoveredModel[] | null> {
+  return (await collectModelDiscoveryPagesWithStatus(first, endpoint, fetchPage, options)).models;
+}
+
+export async function collectModelDiscoveryPagesWithStatus(
+  first: unknown,
+  endpoint: string,
+  fetchPage: (url: string) => Promise<unknown>,
+  options: { requireComplete?: boolean } = {},
+): Promise<CollectedModelDiscoveryPages> {
   const origin = new URL(endpoint);
   const visited = new Set([origin.toString()]);
   const models = new Map<string, DiscoveredModel>();
@@ -25,28 +72,35 @@ export async function collectModelDiscoveryPages(
       } : model);
     }
   };
+  const partial = (): CollectedModelDiscoveryPages =>
+    ({ models: !options.requireComplete && models.size ? [...models.values()] : null, complete: false });
   let page = first;
   let current = origin;
+  // Stays false unless the advertised pages end normally; any skipped,
+  // refused, failed or capped page leaves the catalog partial.
+  let complete = false;
+  let allRowsValid = true;
   for (let count = 0; count < 100; count++) {
     const parsed = parseModelsListResponse(page, endpoint);
-    if (!parsed) return options.requireComplete ? null : models.size ? [...models.values()] : null;
-    if (options.requireComplete) {
-      const record = page as { data?: unknown; models?: unknown };
-      const raw = Array.isArray(page) ? page : Array.isArray(record.data) ? record.data
-        : Array.isArray(record.models) ? record.models : [];
-      // Malformed rows are not evidence that a previously saved model was removed.
-      if (raw.some(item => {
-        if (parseModelsListResponse([item], endpoint)?.length) return false;
-        // Google also returns non-chat resources which the discovery parser
-        // intentionally excludes. Those are valid rows, not a truncated response.
+    if (!parsed) return count === 0 ? { models: null, complete: false } : partial();
+    const record = page as { data?: unknown; models?: unknown; error?: unknown; error_code?: unknown };
+    const raw = Array.isArray(page) ? page : Array.isArray(record.data) ? record.data
+      : Array.isArray(record.models) ? record.models : [];
+    // A rejected envelope or malformed row is not evidence that a model is absent.
+    // Google non-chat resources are intentionally excluded, not malformed.
+    const malformed = (record.error != null && record.error !== '')
+      || (record.error_code !== undefined && record.error_code !== 0)
+      || raw.some(item => {
+        if (parseModelsListResponse({ data: [item] }, endpoint)?.length) return false;
         return !(item && typeof item === 'object' && typeof item.name === 'string'
           && item.name.startsWith('models/') && Array.isArray(item.supportedGenerationMethods)
           && !item.supportedGenerationMethods.includes('generateContent'));
-      })) return null;
-    }
+      });
+    if (malformed && options.requireComplete) return partial();
+    if (malformed) allRowsValid = false;
     append(parsed);
-    if (models.size >= 10_000) return options.requireComplete ? null : [...models.values()];
-    if (!page || typeof page !== 'object' || Array.isArray(page)) break;
+    if (models.size >= 10_000) return partial();
+    if (!page || typeof page !== 'object' || Array.isArray(page)) { complete = true; break; }
     const data = page as Record<string, unknown>;
     const next = new URL(current);
     const token = data.nextPageToken ?? data.next_page_token;
@@ -58,22 +112,16 @@ export async function collectModelDiscoveryPages(
       next.searchParams.set('after_id', data.last_id);
     else if (typeof link === 'string' && link) {
       let resolved: URL;
-      try { resolved = new URL(link, current); } catch { if (options.requireComplete) return null; break; }
+      try { resolved = new URL(link, current); } catch { break; }
       if (resolved.origin !== origin.origin || resolved.pathname !== origin.pathname || resolved.username || resolved.password) {
-        if (options.requireComplete) return null;
         break;
       }
       next.href = resolved.href;
-    } else {
-      if (options.requireComplete && (data.has_more === true || token || cursor || link)) return null;
-      break;
-    }
-    if (visited.has(next.toString()) || count === 99) {
-      if (options.requireComplete) return null;
-      break;
-    }
+    } else if (data.has_more === true || hasUnfollowedPagination(data, models.size)) break;
+    else { complete = true; break; }
+    if (visited.has(next.toString()) || count === 99) break;
     visited.add(next.toString());
-    try { page = await fetchPage(next.toString()); } catch { if (options.requireComplete) return null; break; }
+    try { page = await fetchPage(next.toString()); } catch { break; }
     current = next;
   }
   // The ordinary OpenRouter list excludes speech. Fetch its separate catalog on
@@ -84,18 +132,19 @@ export async function collectModelDiscoveryPages(
     const speech = new URL(origin);
     speech.searchParams.set('output_modalities', 'speech');
     try {
-      const speechPage = await fetchPage(speech.toString());
-      const parsed = options.requireComplete
-        ? await collectModelDiscoveryPages(speechPage, speech.toString(), fetchPage, options)
-        : parseModelsListResponse(speechPage, speech.toString());
-      if (!parsed && options.requireComplete) return null;
-      const speechModels = (parsed ?? []).filter(model => model.discoveredMetadata?.mode === 'audio_speech');
-      if (options.requireComplete && new Set([...models.keys(), ...speechModels.map(model => model.id)]).size > 10_000) return null;
+      const speechCatalog = await collectModelDiscoveryPagesWithStatus(
+        await fetchPage(speech.toString()), speech.toString(), fetchPage, options,
+      );
+      if (!speechCatalog.complete) complete = false;
+      const speechModels = (speechCatalog.models ?? []).filter(model => model.discoveredMetadata?.mode === 'audio_speech');
+      if (new Set([...models.keys(), ...speechModels.map(model => model.id)]).size > 10_000) complete = false;
       append(speechModels);
     } catch {
-      if (options.requireComplete) return null;
-      // Additive discovery can still use the successfully fetched chat catalog.
+      // Keep the successfully fetched catalog, as for a failed pagination request.
+      complete = false;
     }
   }
-  return [...models.values()];
+  complete &&= allRowsValid;
+  if (!complete && options.requireComplete) return partial();
+  return { models: [...models.values()], complete };
 }

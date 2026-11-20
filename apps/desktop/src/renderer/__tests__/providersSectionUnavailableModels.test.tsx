@@ -43,6 +43,7 @@ const {
     disabledProviders: {} as Record<string, true>,
     mediaReady: false,
     customOverride: null as ProviderView | null,
+    legacyGemini: null as ProviderView | null,
     /** The run location the user chose for Anthropic on this computer's provider page. */
     anthropicRunLocation: undefined as string | undefined,
     loading: false,
@@ -140,6 +141,7 @@ vi.mock('@/hooks/useProviders', () => ({
       } satisfies ProviderView,
     ];
     const byId = new Map<string, ProviderView>(providers.map((provider) => [provider.id, provider]));
+    if (providerSnapshotState.legacyGemini) byId.set('gemini', providerSnapshotState.legacyGemini);
     if (providerSnapshotState.customOverride) {
       byId.delete('custom');
       byId.set(providerSnapshotState.customOverride.id, providerSnapshotState.customOverride);
@@ -252,6 +254,7 @@ beforeEach(() => {
   providerSnapshotState.disabledProviders = {};
   providerSnapshotState.mediaReady = false;
   providerSnapshotState.customOverride = null;
+  providerSnapshotState.legacyGemini = null;
   providerSnapshotState.anthropicRunLocation = undefined;
   providerSnapshotState.loading = false;
   providerSnapshotState.error = null;
@@ -345,7 +348,7 @@ describe('ProvidersSection — 双栏管理', () => {
   // but a complete response now owns membership. The old batching case asserted
   // additions-only retention and missed empty and failed batch results. A saved
   // manual ID absent from the response distinguishes removal from failure safety.
-  it.each(['models', 'empty', 'partial-failure', 'failed'] as const)(
+  it.each(['models', 'empty', 'partial-failure', 'partial-incomplete', 'partial-unknown', 'failed'] as const)(
     'batches a saved Hinoki refresh and synchronizes only successful runtimes: %s', async outcome => {
       const preset = BUNDLED_CATALOG.presets!.find(p => p.id === 'hinoki')!;
       const config: CustomProviderConfig = {
@@ -366,7 +369,11 @@ describe('ProvidersSection — 双栏管理', () => {
         if (outcome === 'failed' || (outcome === 'partial-failure' && request.agent === 'codex')) {
           return { ok: false, status: 503 };
         }
-        return { ok: true, models: outcome === 'empty' ? [] : [
+        if (request.agent === 'codex' && (outcome === 'partial-incomplete' || outcome === 'partial-unknown')) {
+          return { ok: true, models: [{ id: 'uncertain', name: 'Partial result' }],
+            ...(outcome === 'partial-incomplete' ? { complete: false } : {}) };
+        }
+        return { ok: true, complete: true, models: outcome === 'empty' ? [] : [
           { id: 'new-model', name: 'New model' }, { id: retained.id, name: 'Upstream name' },
         ] };
       });
@@ -398,7 +405,7 @@ describe('ProvidersSection — 双栏管理', () => {
       const saved = vi.mocked(updateCustomProvider).mock.lastCall![0];
       for (const agent of provider.agents) {
         const models = saved.runtimes[agent]!.models;
-        if (outcome === 'partial-failure' && agent === 'codex') {
+        if (outcome.startsWith('partial-') && agent === 'codex') {
           expect(models).toEqual(config.runtimes[agent]!.models);
         } else {
           expect(models.map(model => model.id).sort()).toEqual(outcome === 'empty' ? [] : ['kept-model', 'new-model']);
@@ -411,7 +418,7 @@ describe('ProvidersSection — 双栏管理', () => {
         }
       }
       expect(vi.mocked(updateCustomProvider).mock.lastCall![2]).toEqual({ source: 'manual-settings' });
-      if (outcome === 'partial-failure') {
+      if (outcome.startsWith('partial-')) {
         expect(toast.error).toHaveBeenCalledWith('settings.providers.models.refreshFailed');
         expect(toast.success).not.toHaveBeenCalled();
       } else {
@@ -453,7 +460,7 @@ describe('ProvidersSection — 双栏管理', () => {
       ],
     };
     selectSpeechProvider(config);
-    window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, models: empty ? [] : [
+    window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, complete: true, models: empty ? [] : [
       { id: 'kept-model', name: 'Upstream' }, { id: 'new-model', name: 'New' },
     ] }));
     render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
@@ -479,7 +486,7 @@ describe('ProvidersSection — 双栏管理', () => {
         : kind === 'explicit-other'
           ? [{ id: 'speech-2.8-turbo', name: 'Not TTS', discoveredMetadata: { mode: 'other' as const } }]
           : [];
-      window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, models: [
+      window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, complete: true, models: [
         { id: 'MiniMax-M3', name: 'Upstream name' }, ...discovered,
       ] }));
       render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
@@ -510,7 +517,7 @@ describe('ProvidersSection — 双栏管理', () => {
         { id: discovered.id, aliases: [], defaults: { mode: 'audio_speech' } }],
     };
     selectSpeechProvider(config, modelRegistry);
-    window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, models: [discovered] }));
+    window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, complete: true, models: [discovered] }));
     render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
     await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.models.refreshAria' })); });
     const saved = vi.mocked(updateCustomProvider).mock.lastCall![0];
@@ -541,7 +548,7 @@ describe('ProvidersSection — 双栏管理', () => {
     expect(providerSnapshotState.customOverride!.audioModels).toEqual([
       expect.objectContaining({ id: savedAudio.id, mode, defaultEnabled, sourceAgent: agent }),
     ]);
-    window.electronAPI.maker.fetchProviderModels = vi.fn(async request => ({ ok: true,
+    window.electronAPI.maker.fetchProviderModels = vi.fn(async request => ({ ok: true, complete: true,
       models: request.agent === agent ? [{ id: savedAudio.id, name: savedAudio.name }] : [],
     }));
     render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
@@ -561,7 +568,7 @@ describe('ProvidersSection — 双栏管理', () => {
       selectSpeechProvider(config);
       if (kind === 'oauth') providerSnapshotState.customOverride!.auth = { method: 'oauth' };
       if (kind === 'disabled-route') providerSnapshotState.customOverride!.routing.codex!.disabled = true;
-      window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true,
+      window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, complete: true,
         models: [{ id: 'MiniMax-M3', name: 'Chat' }] }));
       render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
       expect(screen.queryByRole('button', { name: 'settings.providers.speechSetup.add' })).toBeNull();
@@ -627,7 +634,7 @@ describe('ProvidersSection — 双栏管理', () => {
       selectSpeechProvider(config);
       window.electronAPI.maker.fetchProviderModels = vi.fn(async request => (
         kind === 'failed-target' && request.agent === 'codex' ? { ok: false, status: 401 }
-          : { ok: true, models: [{ id: 'another-chat', name: 'Another chat' }] }
+          : { ok: true, complete: true, models: [{ id: 'another-chat', name: 'Another chat' }] }
       ));
       render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
       await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.models.refreshAria' })); });
@@ -676,7 +683,7 @@ describe('ProvidersSection — 双栏管理', () => {
           models: [{ id: 'chat-model', name: 'My chat', defaultEnabled: false }] },
       } };
       selectSpeechProvider(config);
-      window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true,
+      window.electronAPI.maker.fetchProviderModels = vi.fn(async () => ({ ok: true, complete: true,
         models: [{ id: 'chat-model', name: 'Upstream chat' }] }));
       if (action !== 'idle') vi.mocked(updateCustomProvider).mockResolvedValueOnce({ ok: false,
         confirmationRequired: 'codex-image-generation-reload', busyCount: 1 });
@@ -726,6 +733,69 @@ describe('ProvidersSection — 双栏管理', () => {
     expect(screen.queryByRole('switch', { name: 'Custom model' })).toBeNull();
   });
 
+  // #9619: saved connection refresh must consume structured failures instead of
+  // losing them in continue. Real component/button, in-memory IPC responses (unit).
+  // Minimal failure: all configured runtimes reject discovery. Existing coverage
+  // checked retry/saving but not the reason or OAuth recovery shown to the user.
+  it.each([
+    ['oauth', 'AUTH_INVALID', 'settings.providers.models.refreshReconnect'],
+    ['apiKey', 'AUTH_INVALID', 'providerError.AUTH_INVALID'],
+    ['oauth', 'UPSTREAM_ERROR', 'providerError.UPSTREAM_ERROR'],
+    ['oauth', 'UPSTREAM_UNREACHABLE', 'providerError.UPSTREAM_UNREACHABLE'],
+  ] as const)('explains %s refresh failure %s and allows recovery', async (method, code, message) => {
+    const oauth = providerPresetOAuth('github-copilot')!;
+    providerSnapshotState.customOverride = {
+      id: 'copilot-saved', name: 'Copilot', source: 'user', agents: ['codex'], connected: true,
+      auth: method === 'oauth' ? { method, oauth } : { method },
+      routing: { codex: { upstream: 'https://api.enterprise.githubcopilot.com', authStrategy: 'oauth-token' } },
+      models: { codex: [{ id: 'old-model', name: 'Old', contextWindow: 64000, efforts: [], defaultEffort: null, defaultEnabled: false }] },
+    };
+    providerSnapshotState.order = ['copilot-saved', 'xd'];
+    const fetchModels = vi.fn().mockResolvedValueOnce({ ok: false, code, status: 401, detail: 'synthetic-secret' })
+      .mockResolvedValue({ ok: true, complete: true, models: [{ id: 'new-model', name: 'New' }] });
+    Object.assign(window.electronAPI.maker, { fetchProviderModels: fetchModels });
+    render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.models.refreshAria' })); });
+    expect(toast.error).toHaveBeenCalledWith(message);
+    expect(updateCustomProvider).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(toast.error).mock.calls)).not.toContain('synthetic-secret');
+    const refresh = screen.getByRole('button', { name: 'settings.providers.models.refreshAria' });
+    expect(refresh.hasAttribute('disabled')).toBe(false);
+    await act(async () => { fireEvent.click(refresh); });
+    expect(updateCustomProvider).toHaveBeenCalledOnce();
+    expect(vi.mocked(updateCustomProvider).mock.calls[0][0].runtimes.codex!.models).toEqual([expect.objectContaining({ id: 'new-model' })]);
+    expect(toast.success).toHaveBeenCalledWith('settings.providers.models.refreshAdded');
+  });
+
+  it.each([false, true])('preserves multi-runtime refresh semantics (partial success: %s)', async partialSuccess => {
+    const oauth = providerPresetOAuth('github-copilot')!;
+    const model = { id: 'old-model', name: 'Old', contextWindow: 64000, efforts: [], defaultEffort: null, defaultEnabled: false };
+    const route = { upstream: 'https://api.enterprise.githubcopilot.com', authStrategy: 'oauth-token' as const };
+    providerSnapshotState.customOverride = {
+      id: 'copilot-mixed', name: 'Copilot', source: 'user', agents: ['codex', 'pi'], connected: true,
+      auth: { method: 'oauth', oauth }, routing: { codex: route, pi: route },
+      models: { codex: [model], pi: [model] },
+    };
+    providerSnapshotState.order = ['copilot-mixed', 'xd'];
+    Object.assign(window.electronAPI.maker, { fetchProviderModels: vi.fn()
+      .mockResolvedValueOnce({ ok: false, code: 'UPSTREAM_ERROR', status: 503 })
+      .mockResolvedValueOnce(partialSuccess ? { ok: true, complete: true, models: [{ id: 'new-model', name: 'New' }] }
+        : { ok: false, code: 'AUTH_INVALID', status: 401 }) });
+    render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.models.refreshAria' })); });
+    if (partialSuccess) {
+      expect(toast.error).toHaveBeenCalledWith('settings.providers.models.refreshFailed');
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(updateCustomProvider).toHaveBeenCalledOnce();
+      const saved = vi.mocked(updateCustomProvider).mock.calls[0][0];
+      expect(saved.runtimes.codex!.models).toEqual([expect.objectContaining({ id: 'old-model', defaultEnabled: false })]);
+      expect(saved.runtimes.pi!.models).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'new-model' })]));
+    } else {
+      expect(toast.error).toHaveBeenCalledWith('settings.providers.models.refreshReconnect');
+      expect(updateCustomProvider).not.toHaveBeenCalled();
+    }
+  });
+
   it.each([
     ['openrouter-existing', 'oauth', true],
     ['openrouter-new', 'oauth', false],
@@ -744,12 +814,12 @@ describe('ProvidersSection — 双栏管理', () => {
       models: { codex: hasModels ? [{ id: 'old-model', name: 'Old', contextWindow: 64000, efforts: [], defaultEffort: null, defaultEnabled: false }] : [] },
     };
     providerSnapshotState.order = [id, 'xd'];
-    const fetchModels = vi.fn(async () => ({ ok: true, models: [
+    const fetchModels = vi.fn(async () => ({ ok: true, complete: true, models: [
       { id: 'old-model', name: 'Old' },
       { id: 'new-model', name: 'New', discoveredMetadata: { nativeApi: 'openai-responses' } },
       { id: 'chat-model', name: 'Chat', discoveredMetadata: { nativeApi: 'openai-completions' } },
     ] }));
-    if (id === 'openrouter-retry') fetchModels.mockResolvedValueOnce({ ok: false, models: [] });
+    if (id === 'openrouter-retry') fetchModels.mockResolvedValueOnce({ ok: false, complete: false, models: [] });
     Object.assign(window.electronAPI.maker, { fetchProviderModels: fetchModels });
     if (id === 'openrouter-reconnected') providerSnapshotState.customOverride.connected = false;
     const view = render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
@@ -790,6 +860,57 @@ describe('ProvidersSection — 双栏管理', () => {
     if (hasModels) expect(projected.find(model => model.id === 'old-model')?.defaultEnabled).toBe(false);
     expect(refetchProvidersSpy).toHaveBeenCalled();
   });
+  // Renderer unit: a saved binding must expose the original image preferences under
+  // the new connection, even when no legacy API key has ever been configured.
+  it.each(['first setup', 'old key retained', 'old row removed while suspended'])(
+    'manages bound Gemini images after %s', async state => {
+      const legacyConnected = state === 'old key retained';
+      const legacySuspended = state === 'old row removed while suspended';
+      providerSnapshotState.customOverride = {
+        id: 'new-google', name: 'Google Gemini API', source: 'user', connected: true,
+        auth: { method: 'apiKey' }, agents: ['codex'], routing: {}, models: { codex: [] },
+      };
+      providerSnapshotState.legacyGemini = {
+        id: 'gemini', name: 'My old Gemini', source: 'builtin', connected: legacyConnected,
+        auth: { method: 'apiKey' }, agents: [], routing: {}, models: {},
+        imageModels: [{ id: 'gemini-image-test', name: 'Gemini image test' }],
+        availableMediaModelIds: legacySuspended ? [] : ['gemini-image-test'],
+        suspended: legacySuspended,
+        removed: legacySuspended || undefined,
+        geminiImageSettingsConnectionId: 'new-google',
+      };
+      providerSnapshotState.order = ['new-google', 'gemini', 'xd'];
+      const setModelDisable = vi.fn<typeof window.electronAPI.maker.setModelDisable>().mockResolvedValue({ ok: true });
+      window.electronAPI.maker.setModelDisable = setModelDisable;
+      const view = render(<MemoryRouter><ProvidersSection /></MemoryRouter>);
+
+      if (legacySuspended) {
+        fireEvent.click(await screen.findByRole('button', { name: 'settings.providers.button.enableProvider' }));
+        expect(setModelDisable).toHaveBeenCalledWith({ kind: 'provider', providerId: 'gemini', disabled: false });
+        providerSnapshotState.legacyGemini = {
+          ...providerSnapshotState.legacyGemini,
+          suspended: false,
+          availableMediaModelIds: ['gemini-image-test'],
+        };
+        view.rerender(<MemoryRouter><ProvidersSection /></MemoryRouter>);
+      }
+
+      const imageSwitch = await screen.findByRole('switch', { name: 'Gemini image test' });
+      fireEvent.click(imageSwitch);
+      expect(setModelVisibilities).toHaveBeenCalledWith(
+        'gemini', [expect.objectContaining({ modelId: 'gemini-image-test' })], expect.any(Boolean),
+      );
+      if (legacyConnected) {
+        fireEvent.click(screen.getByRole('button', { name: /^My old Gemini/ }));
+        expect(screen.queryByText('Gemini image test')).toBeNull();
+        fireEvent.keyDown(screen.getByRole('button', { name: 'settings.providers.detail.moreActionsAria' }), { key: 'ArrowDown' });
+        expect(await screen.findByRole('menuitem', { name: 'settings.providers.builtinApiKey.replaceKey' })).toBeTruthy();
+        expect(screen.queryByRole('menuitem', { name: 'settings.providers.menu.disableProvider' })).toBeNull();
+      } else {
+        expect(screen.queryByRole('button', { name: /My old Gemini/ })).toBeNull();
+      }
+    });
+
   it('dims GPT Image 2 without a ready image channel, independently of chat connection', async () => {
     providerSnapshotState.order = ['custom', 'xd'];
     providerSnapshotState.customConnected = true;
