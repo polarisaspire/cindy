@@ -303,6 +303,20 @@ test('worktree includes staged, unstaged and untracked source; commit mode exclu
   for (const args of [['--base-ref'], ['--bogus'], ['--base-ref','missing-ref'], ['--head-ref',commit,'--worktree']]) assert.equal(cli(...args).status,2);
   const workflow = matter.engines.yaml.parse(fs.readFileSync(path.join(root,'.github/workflows/ci.yml'),'utf8'));
   const summary = workflow.jobs.verify.steps[0];
+  // Full CI must still reject an independently failed, cancelled, or missing macOS run.
+  const runVerify = ({ checks = 'success', shards = 'success', typecheck = 'success',
+    selection = 'success', required = 'true', hosts = 'success', macos = 'success' } = {}) => {
+    // Set fixture values inside the script: the Windows bash/WSL shim need not
+    // forward Node's environment object.
+    return runBash(summary.run
+      .replaceAll('$VERIFY_CHECKS_RESULT', checks)
+      .replaceAll('$TYPECHECK_RESULT', typecheck)
+      .replaceAll('$LINUX_UNIT_SHARDS_RESULT', shards)
+      .replaceAll('$HOST_CHANGES_RESULT', selection)
+      .replaceAll('$HOST_REQUIRED', required)
+      .replaceAll('$HOST_REGRESSIONS_RESULT', hosts)
+      .replaceAll('$HOST_MACOS_RESULT', macos));
+  };
   for (const checks of ['success','failure','cancelled','skipped']) {
     for (const shards of ['success','failure','cancelled','skipped']) {
       // The parallel typecheck job blocks verify like the checks it was split from.
@@ -312,17 +326,7 @@ test('worktree includes staged, unstaged and untracked source; commit mode exclu
       for (const selection of allGreen ? ['success','failure','cancelled','skipped'] : ['success']) {
       for (const required of allGreen ? ['true','false',''] : ['true']) {
       for (const hosts of allGreen ? ['success','failure','cancelled','skipped'] : ['success']) {
-      // Windows' bash.exe is a WSL shim and does not forward Node's ad-hoc
-      // environment object. Set fixture values inside the shell script so
-      // this contract test behaves the same on Windows and Linux.
-      const aggregateScript = summary.run
-        .replaceAll('$VERIFY_CHECKS_RESULT', checks)
-        .replaceAll('$TYPECHECK_RESULT', typecheck)
-        .replaceAll('$LINUX_UNIT_SHARDS_RESULT', shards)
-        .replaceAll('$HOST_CHANGES_RESULT', selection)
-        .replaceAll('$HOST_REQUIRED', required)
-        .replaceAll('$HOST_REGRESSIONS_RESULT', hosts);
-      const aggregate = runBash(aggregateScript);
+      const aggregate = runVerify({ checks, shards, typecheck, selection, required, hosts, macos: hosts });
       if (!aggregate) return t.skip('Git Bash is unavailable on this host');
       // Host regressions may be skipped only when selection succeeded and said they are not needed.
       const hostOk = selection === 'success'
@@ -334,14 +338,12 @@ test('worktree includes staged, unstaged and untracked source; commit mode exclu
       }
     }
   }
-  const propagatedScript = summary.run
-    .replaceAll('$VERIFY_CHECKS_RESULT', failed.status ? 'failure' : 'success')
-    .replaceAll('$TYPECHECK_RESULT', 'success')
-    .replaceAll('$LINUX_UNIT_SHARDS_RESULT', 'success')
-    .replaceAll('$HOST_CHANGES_RESULT', 'success')
-    .replaceAll('$HOST_REQUIRED', 'true')
-    .replaceAll('$HOST_REGRESSIONS_RESULT', 'success');
-  const propagated = runBash(propagatedScript);
+  for (const macos of ['failure', 'cancelled', 'skipped', '']) {
+    assert.equal(runVerify({ macos }).status === 0, false, `required macOS status: ${macos}`);
+  }
+  assert.equal(runVerify({ required: 'false', hosts: 'skipped' }).status === 0, false,
+    'an unneeded macOS check must be skipped as selected');
+  const propagated = runVerify({ checks: failed.status ? 'failure' : 'success' });
   if (!propagated) return t.skip('Git Bash is unavailable on this host');
   assert.notEqual(propagated.status,0);
   fs.writeFileSync(path.join(temp,'scripts/hardcoded-color-exemptions.json'),'{bad json');
@@ -443,12 +445,20 @@ test('CI design commands feed the existing verify job and preserve Windows aggre
   assert.ok(pkg.scripts['test:runner'].includes('scripts/__tests__/hardcoded-color-audit.test.mjs'));
   assert.equal(workflow.jobs.verify.name,'verify');
   assert.match(workflow.jobs.verify.if,/always\(\)/);
-  assert.deepEqual(workflow.jobs.verify.needs,['verify-checks','typecheck','linux-unit-shards','host-changes','host-regressions']);
+  assert.deepEqual(workflow.jobs.verify.needs, [
+    'verify-checks', 'typecheck', 'linux-unit-shards', 'host-changes', 'host-regressions', 'host-regressions-macos',
+  ]);
   const host = workflow.jobs['host-regressions'];
   assert.equal(host.needs, 'host-changes');
-  assert.deepEqual(host.strategy.matrix.os, ['ubuntu-latest', 'windows-latest', 'macos-latest']);
+  assert.deepEqual(host.strategy.matrix.os, ['ubuntu-latest', 'windows-latest']);
   assert.equal(host['continue-on-error'], undefined);
   assert.ok(host.steps.some(s => s.run === 'pnpm --filter @cindy/host test'));
+  const macHost = workflow.jobs['host-regressions-macos'];
+  assert.equal(macHost.needs, 'host-changes');
+  assert.equal(macHost.if, host.if);
+  assert.equal(macHost['runs-on'], 'macos-latest');
+  assert.equal(macHost['continue-on-error'], undefined);
+  assert.deepEqual(macHost.steps, host.steps);
   const windows=workflow.jobs['windows-unit'];
   assert.equal(windows.name,'Windows unit tests');
   assert.deepEqual(windows.needs,['windows-unit-shards','windows-runner-checks']);
@@ -474,6 +484,25 @@ test('CI design commands feed the existing verify job and preserve Windows aggre
       assert.equal(run.status===0,result==='success',`${target}=${result}`);
     }
   }
+});
+
+// Release CI must not wait on macOS Host, but cannot publish without all of the
+// Windows/Linux checks, including the existing Windows runner/database aggregate.
+test('Windows/Linux publication has a separate exact-main CI gate', () => {
+  const { jobs } = matter.engines.yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8'));
+  const release = jobs['release-ready'];
+  assert.equal(release.name, 'Windows/Linux release-ready');
+  assert.equal(release.if,
+    "${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}");
+  assert.deepEqual(release.needs, [
+    'verify-checks', 'typecheck', 'linux-unit-shards', 'windows-unit', 'git-integration', 'host-changes', 'host-regressions',
+  ]);
+  assert.equal(release['continue-on-error'], undefined);
+  const step = release.steps[0];
+  assert.equal(step['continue-on-error'], undefined);
+  assert.equal(step.env.HOST_REQUIRED, '${{ needs.host-changes.outputs.required }}');
+  assert.equal(step.env.HOST_REGRESSIONS_RESULT, '${{ needs.host-regressions.result }}');
+  assert.match(step.run, /true:success\|false:skipped/);
 });
 
 test('new off-scale radii block in Desktop renderer consumers; governed and dynamic values stay report-only', () => {

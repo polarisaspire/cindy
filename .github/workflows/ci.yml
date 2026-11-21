@@ -297,6 +297,8 @@ jobs:
 
   # Host's Node tests are outside the Vitest workspace tiers. Exercise its
   # actual loaders, HTTP authorization and worker processes on every desktop OS.
+  # Split macOS so release readiness can use the same Windows/Linux Host jobs
+  # without waiting for macOS; the existing full verify check still requires all three.
   # Credential tests use synthetic records; no login or system keychain access.
   host-regressions:
     needs: host-changes
@@ -307,8 +309,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
+        os: [ubuntu-latest, windows-latest]
+    steps: &host-regression-steps
       - name: Checkout client
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -331,8 +333,16 @@ jobs:
       # gains a port wired only in the desktop assembly passes the desktop checks
       # and fails here instead of at runtime in the Host.
       - name: Typecheck Host
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: pnpm --filter @cindy/host typecheck
+
+  host-regressions-macos:
+    needs: host-changes
+    if: needs.host-changes.outputs.required == 'true'
+    name: Host regressions (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps: *host-regression-steps
 
   # 保留原 required check 名 verify；Host 仅允许明确无关时跳过，选择失败也阻断。
   verify:
@@ -344,6 +354,7 @@ jobs:
       - linux-unit-shards
       - host-changes
       - host-regressions
+      - host-regressions-macos
     runs-on: ubuntu-latest
     steps:
       - name: Require checks and every Linux unit shard
@@ -354,6 +365,7 @@ jobs:
           HOST_CHANGES_RESULT: ${{ needs.host-changes.result }}
           HOST_REQUIRED: ${{ needs.host-changes.outputs.required }}
           HOST_REGRESSIONS_RESULT: ${{ needs.host-regressions.result }}
+          HOST_MACOS_RESULT: ${{ needs.host-regressions-macos.result }}
         run: |
           test "$VERIFY_CHECKS_RESULT" = "success"
           test "$TYPECHECK_RESULT" = "success"
@@ -362,6 +374,10 @@ jobs:
           case "$HOST_REQUIRED:$HOST_REGRESSIONS_RESULT" in
             true:success|false:skipped) ;;
             *) echo "Host selection or regressions did not pass"; exit 1 ;;
+          esac
+          case "$HOST_REQUIRED:$HOST_MACOS_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "macOS Host selection or regressions did not pass"; exit 1 ;;
           esac
 
   # Linux 全绿不能覆盖 path separator、盘符、大小写和文件系统能力差异。八个
@@ -579,3 +595,39 @@ jobs:
 
       - name: Run Desktop Git integration tests
         run: pnpm test:git-integration
+
+  # Publication only: exact main CI evidence for the two shipped platforms.
+  # Do not depend on the full verify check: it must continue requiring macOS Host.
+  release-ready:
+    name: Windows/Linux release-ready
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    needs:
+      - verify-checks
+      - typecheck
+      - linux-unit-shards
+      - windows-unit
+      - git-integration
+      - host-changes
+      - host-regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every applicable Windows/Linux release check
+        env:
+          VERIFY_CHECKS_RESULT: ${{ needs.verify-checks.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          LINUX_UNIT_SHARDS_RESULT: ${{ needs.linux-unit-shards.result }}
+          WINDOWS_UNIT_RESULT: ${{ needs.windows-unit.result }}
+          GIT_INTEGRATION_RESULT: ${{ needs.git-integration.result }}
+          HOST_CHANGES_RESULT: ${{ needs.host-changes.result }}
+          HOST_REQUIRED: ${{ needs.host-changes.outputs.required }}
+          HOST_REGRESSIONS_RESULT: ${{ needs.host-regressions.result }}
+        run: |
+          set -euo pipefail
+          for result in "$VERIFY_CHECKS_RESULT" "$TYPECHECK_RESULT" "$LINUX_UNIT_SHARDS_RESULT" "$WINDOWS_UNIT_RESULT" "$GIT_INTEGRATION_RESULT" "$HOST_CHANGES_RESULT"; do
+            test "$result" = "success"
+          done
+          case "$HOST_REQUIRED:$HOST_REGRESSIONS_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Windows/Linux Host selection or regressions did not pass"; exit 1 ;;
+          esac

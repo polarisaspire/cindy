@@ -30,8 +30,10 @@ function fixture(options = {}) {
   if (options.pending !== false) state.upstream.unshift(stable('v0.1.126', target));
   function ancestor(a, b) { return a === b || (state.parents.get(b) ?? []).some(parent => ancestor(a, parent)); }
   const run = (workflow, sha, title, conclusion = 'success') => ({ id: state.nextRun++, path: `.github/workflows/${workflow}`,
-    head_sha: sha, display_title: title, event: 'workflow_dispatch', status: 'completed', conclusion, run_attempt: 1,
+    head_sha: sha, head_branch: 'main', head_repository: { full_name: 'polarisaspire/cindy' },
+    display_title: title, event: 'workflow_dispatch', status: 'completed', conclusion, run_attempt: 1,
     html_url: 'https://github.com/polarisaspire/cindy/actions/runs/test' });
+  const releaseJobs = new Map();
   const runtime = {
     now: () => state.clock,
     sleep: async ms => { state.clock += ms; },
@@ -66,7 +68,13 @@ function fixture(options = {}) {
       if (endpoint === `${repo}/git/ref/heads/main`) return { object: { sha: options.dispatchRace ? later : state.remote } };
       if (endpoint.includes('/runs?head_sha=')) {
         const workflow = endpoint.split('/workflows/')[1].split('/')[0];
-        return { workflow_runs: state.runs.filter(item => item.path.endsWith('/' + workflow)) };
+        const workflow_runs = state.runs.filter(item => item.path.endsWith('/' + workflow));
+        return { total_count: workflow_runs.length, workflow_runs };
+      }
+      const attemptJobs = endpoint.match(/actions\/runs\/(\d+)\/attempts\/(\d+)\/jobs\?per_page=100$/);
+      if (attemptJobs) {
+        const jobs = releaseJobs.get(`${attemptJobs[1]}:${attemptJobs[2]}`) ?? [];
+        return { total_count: jobs.length, jobs };
       }
       if (endpoint.endsWith('/dispatches')) {
         const workflow = endpoint.split('/workflows/')[1].split('/')[0], fields = config.fields;
@@ -94,7 +102,16 @@ function fixture(options = {}) {
       assert.fail('Unexpected API: ' + endpoint);
     },
   };
-  state.addCI = (sha = state.head, conclusion = 'success') => state.runs.push(run('ci.yml', sha, 'client-ci', conclusion));
+  state.addCI = (sha = state.head, conclusion = 'success') => {
+    const item = run('ci.yml', sha, 'client-ci', conclusion);
+    state.runs.push(item);
+    const jobs = conclusion === 'success' ? [{
+      name: 'Windows/Linux release-ready', run_id: item.id, run_attempt: item.run_attempt,
+      head_sha: sha, head_branch: 'main', status: 'completed', conclusion: 'success',
+    }] : [];
+    releaseJobs.set(`${item.id}:${item.run_attempt}`, jobs);
+    return { item, jobs };
+  };
   return { state, runtime, run };
 }
 
@@ -218,6 +235,66 @@ test('CI success for another commit or an older successful attempt cannot author
   assert.equal(publicationGate({ sourceSha: head }, f.runtime).proceed, true);
   f.state.addCI(head, 'failure');
   assert.throws(() => publicationGate({ sourceSha: head }, f.runtime), /Exact-source/);
+});
+
+test('latest exact-main publication evidence can pass independently of ongoing or failed macOS CI', () => {
+  for (const [status, conclusion] of [['in_progress', null], ['completed', 'failure']]) {
+    const f = fixture();
+    const { item } = f.state.addCI(head);
+    Object.assign(item, { status, conclusion });
+    assert.equal(publicationGate({ sourceSha: head }, f.runtime).proceed, true);
+  }
+});
+
+test('publication ignores ineligible workflow runs, even if the purported release job passed', () => {
+  for (const changes of [{ head_sha: old }, { head_branch: 'feature' },
+    { head_repository: { full_name: 'makecindy/cindy' } }, { path: '.github/workflows/other.yml' },
+    { event: 'pull_request' }, { event: 'merge_group' }, { event: 'workflow_run' },
+    { status: 'queued', conclusion: null }, { status: 'completed', conclusion: 'cancelled' },
+    { run_attempt: undefined }]) {
+    const f = fixture();
+    const { item } = f.state.addCI(head);
+    Object.assign(item, changes);
+    assert.throws(() => publicationGate({ sourceSha: head }, f.runtime), /Exact-source/);
+  }
+});
+
+test('publication rejects nonunique, unsuccessful, and mismatched latest-attempt job evidence', () => {
+  for (const change of [jobs => jobs.splice(0), jobs => jobs.push({ ...jobs[0] }),
+    jobs => { jobs[0].status = 'in_progress'; jobs[0].conclusion = null; },
+    jobs => { jobs[0].conclusion = 'failure'; }, jobs => { jobs[0].conclusion = 'cancelled'; },
+    jobs => { jobs[0].conclusion = 'skipped'; }, jobs => { jobs[0].run_attempt++; },
+    jobs => { jobs[0].run_id++; }, jobs => { jobs[0].head_sha = old; },
+    jobs => { jobs[0].head_branch = 'feature'; }]) {
+    const f = fixture();
+    const { jobs } = f.state.addCI(head);
+    change(jobs);
+    assert.throws(() => publicationGate({ sourceSha: head }, f.runtime), /Exact-source/);
+  }
+  const retry = fixture();
+  const { item } = retry.state.addCI(head);
+  item.run_attempt++;
+  assert.throws(() => publicationGate({ sourceSha: head }, retry.runtime), /Exact-source/);
+});
+
+test('publication rejects partial CI API evidence, superseding runs, or main movement while reading jobs', () => {
+  for (const scenario of ['incomplete runs', 'incomplete jobs', 'rerun', 'new run', 'new main']) {
+    const f = fixture();
+    const { item } = f.state.addCI(head);
+    const api = f.runtime.api;
+    f.runtime.api = (endpoint, config) => {
+      const result = api(endpoint, config);
+      if (scenario === 'incomplete runs' && endpoint.includes('/runs?head_sha=')) result.total_count++;
+      if (endpoint.includes('/jobs?')) {
+        if (scenario === 'incomplete jobs') result.total_count++;
+        if (scenario === 'rerun') item.run_attempt++;
+        if (scenario === 'new run') f.state.addCI(head);
+        if (scenario === 'new main') f.state.remote = later;
+      }
+      return result;
+    };
+    assert.throws(() => publicationGate({ sourceSha: head }, f.runtime), /Exact-source|exact-source|main changed/);
+  }
 });
 
 test('release requests must name the exact source and remain current on main', () => {
