@@ -98,6 +98,50 @@ export function successfulCI(runtime, sha) {
   const latest = runs(runtime, 'ci.yml', sha)[0];
   return latest?.status === 'completed' && latest.conclusion === 'success';
 }
+// Keep the staging/merge check above independent of this narrower publication signal.
+const RELEASE_READY_JOB = 'Windows/Linux release-ready';
+function latestMainCI(runtime, sha) {
+  const result = runtime.api(
+    `repos/${REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&branch=main&per_page=100`,
+  );
+  const workflowRuns = result?.workflow_runs;
+  requireValue(Array.isArray(workflowRuns) && Number.isSafeInteger(result.total_count)
+    && result.total_count === workflowRuns.length, 'Incomplete exact-source CI run list');
+  const candidates = workflowRuns.filter(run =>
+    run.path === '.github/workflows/ci.yml' && run.head_sha === sha && run.head_branch === 'main'
+    && run.head_repository?.full_name === REPOSITORY && ['push', 'workflow_dispatch'].includes(run.event));
+  requireValue(candidates.every(run => Number.isSafeInteger(run.id) && run.id > 0)
+    && new Set(candidates.map(run => run.id)).size === candidates.length, 'Invalid exact-source CI run identity');
+  return candidates.sort((a, b) => b.id - a.id)[0];
+}
+
+function releaseReadyRun(run) {
+  return run && Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0
+    && ((run.status === 'in_progress' && run.conclusion === null)
+      || (run.status === 'completed' && ['success', 'failure'].includes(run.conclusion)));
+}
+
+function requireReleaseReady(runtime, sha) {
+  const run = latestMainCI(runtime, sha);
+  const blocked = 'Exact-source Windows/Linux release-ready check has not passed; publication is blocked';
+  requireValue(releaseReadyRun(run), blocked);
+  // Attempt-specific jobs are not interchangeable across reruns. An incomplete
+  // response could hide a duplicate match, so do not accept a partial listing.
+  const result = runtime.api(
+    `repos/${REPOSITORY}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
+  );
+  const jobs = result?.jobs;
+  requireValue(Array.isArray(jobs) && Number.isSafeInteger(result.total_count)
+    && result.total_count === jobs.length, blocked);
+  const matches = jobs.filter(job => job.name === RELEASE_READY_JOB);
+  const [job] = matches;
+  requireValue(matches.length === 1 && job.run_id === run.id && job.run_attempt === run.run_attempt
+    && job.head_sha === sha && job.head_branch === 'main'
+    && job.status === 'completed' && job.conclusion === 'success', blocked);
+  // Reject a rerun or newer run that started while the job evidence was fetched.
+  const current = latestMainCI(runtime, sha);
+  requireValue(releaseReadyRun(current) && current.id === run.id && current.run_attempt === run.run_attempt, blocked);
+}
 async function waitRun(runtime, run, deadline, previousAttempt = 0) {
   for (;;) {
     const current = runtime.api(`repos/${REPOSITORY}/actions/runs/${run.id}`);
@@ -143,11 +187,13 @@ export function publicationGate({ sourceSha, expectedSha = '', upstreamTag = '',
   if (expectedSha) requireValue(expectedSha === sourceSha, 'main moved: expected source SHA does not match this run');
   if (requestRef) {
     requireValue(requestRef === `automation/personal-release/${sourceSha}`, 'Release request must name its exact source SHA');
-    requireValue(runtime.api(`repos/${REPOSITORY}/git/ref/heads/main`).object.sha === sourceSha,
-      'main changed after review; review the final source and create a new release request');
   }
+  const assertMain = () => requireValue(runtime.api(`repos/${REPOSITORY}/git/ref/heads/main`).object.sha === sourceSha,
+    'main changed after review; review the final source and create a new release request');
+  if (requestRef || !validateOnly) assertMain();
   if (validateOnly) return { proceed: true, upstream: null };
-  requireValue(successfulCI(runtime, sourceSha), 'Exact-source client-ci has not passed; publication is blocked');
+  requireReleaseReady(runtime, sourceSha);
+  assertMain();
   const catalog = runtime.api(`repos/${REPOSITORY}/releases?per_page=100`, { paginate: true });
   const latest = publishedSource(runtime);
   if (requestRef && sourceIncludes(runtime, latest?.sha, sourceSha)) return { proceed: false, upstream: null };

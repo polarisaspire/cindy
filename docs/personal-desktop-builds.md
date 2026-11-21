@@ -17,7 +17,7 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 产物目录为 `apps/desktop/release/artifacts/global/<version>/<platform>-x64/`，包括 `build-info.json`、`SOURCE.txt`、`SHA256SUMS.txt`。`SOURCE.txt` 记录源码 SHA 和该次 Actions 链接。Artifact 保留 14 天。
 
-构建 job 只有读取权限。正式发布先核验同一源码 SHA 的完整 `client-ci` 成功，再等两平台的测试、类型检查、packaged smoke 和 Debian 12 安装检查全部成功；独立发布 job 才获得本 fork 的 `contents: write`，创建 `v<version>` Release。先上传并验证全部资产、完成旧版兼容入口，再发布为非 prerelease 并设为 Latest；不上传官方更新源。安装包未签名，不需要官方签名凭证。实际分发状态以 GitHub run 与 Release 为准，不能把本地测试通过当成已发布。
+构建 job 只有读取权限。正式发布先核验当前 main 同一源码 SHA 的 `Windows/Linux release-ready` 检查成功，再等两平台的测试、类型检查、packaged smoke 和 Debian 12 安装检查全部成功；独立发布 job 才获得本 fork 的 `contents: write`，创建 `v<version>` Release。先上传并验证全部资产、完成旧版兼容入口，再发布为非 prerelease 并设为 Latest；不上传官方更新源。安装包未签名，不需要官方签名凭证。实际分发状态以 GitHub run 与 Release 为准，不能把本地测试通过当成已发布。
 
 新版通过 GitHub `releases/latest/download/manifest-<platformKey>.json` 检查更新，下载指向对应的 `v1.0.x` 标签。Release 正文和应用内 `release-notes.json` 使用同一份中文说明；`release-notes-index.json` 包含已发布的版本日志索引。应用内日志只读自己 fork 的版本资产，不再向官方 CDN 请求自用版本号。
 
@@ -43,13 +43,15 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 控制器只处理作者为本 fork 维护者、目标为 `polarisaspire/cindy:main` 的 PR，不操作提交到官方仓库的 PR。逐个阅读最终 diff、讨论和审核结果，核对相关规则与 CI；draft、冲突、未解决的反对意见、必须等待的审批或不安全改动不自动合入。检查通过后使用预期 head SHA 合并，若 head/base 改变则重新检查。代码检查不等于替维护者提交 GitHub APPROVE 审核；需要明确审批时报告给维护者。
 
-上游与所有本轮可合入 PR 处理结束后，读取最终 main SHA 并等待该 SHA 的完整 `client-ci` 成功。仍有阻塞项时说明原因与处理结果；未经本轮检查的后续源码不能混入发版。安装包构建只验证待发布源码，不替代代码审查或 PR 合并判断。
+上游暂存和 PR 合并仍使用原有完整检查，包括适用的 macOS Host 回归。上游与本轮可合入 PR 处理结束后，重新读取最终 main SHA，按第三阶段的 Windows/Linux 检查信号判断是否可以请求发布。未经本轮检查的后续源码不能混入发版；安装包验证不替代完整 CI、代码审查或 PR 合并判断。
 
 ### 第三阶段：明确请求最终源码发布
 
 仅在第二阶段结束后，控制器在本 fork 创建 `automation/personal-release/<完整final-SHA>` 分支，目标必须正是当前 main 的 `<final-SHA>`。这是一次性、绑定源码的“本轮检查完成”信号，不是普通 main push。无实际待发布客户端变更、仅部署本维护配置时不创建请求，也不为已包含的上游版本重复发版。
 
-该分支的 `create` 事件触发 **Personal desktop packages**，不是后续 push。只接受 branch 类型及对应请求前缀，其他分支或 tag 的创建不会运行构建，也不共享受控发布的并发组。plan job 验证分支名中的 SHA、事件源码、当前 main、完整 `client-ci` 以及按同一发布时间规则选出的最新官方正式版的祖先关系；同一源码已发布则直接跳过。个人 PR 即使基于已经发布过的上游版本，也可按新的最终源码发版。plan、构建和发布均显式 checkout 固定事件 SHA；Artifact、build-info、SOURCE、清单及标签统一使用它。发布前再次核对 main 与 CI；main 变化或检查失败就停止，控制器必须重新检查最终源码，再提交新的请求。
+该分支的 `create` 事件触发 **Personal desktop packages**，不是后续 push。只接受 branch 类型及对应请求前缀，其他分支或 tag 的创建不会运行构建，也不共享受控发布的并发组。plan job 验证分支名中的 SHA、事件源码、当前 main、`Windows/Linux release-ready` 以及按同一发布时间规则选出的最新官方正式版的祖先关系；同一源码已发布则直接跳过。个人 PR 即使基于已经发布过的上游版本，也可按新的最终源码发版。plan、构建和发布均显式 checkout 固定事件 SHA；Artifact、build-info、SOURCE、清单及标签统一使用它。发布前及提升 draft 时再次核对 main 与发布检查；main 变化或发布检查未通过就停止，控制器必须重新检查最终源码，再提交新的请求。
+
+发布检查只认当前 main 精确 SHA、该 fork 的 `ci.yml` 在 main 上最近一次 push 或手动 CI 的当前尝试，以及其中唯一一个已成功完成的 `Windows/Linux release-ready` 作业。它汇总 Windows/Linux 所需检查；macOS Host 仍会运行并影响完整 CI，不单独阻断已合入源码的 Windows/Linux 发布。新尝试没有该检查结果时不能沿用上一尝试的结果；需要时在当前 main 重新运行完整 `client-ci`。
 
 工作流只构建 Windows x64 和 Linux x64，保留全部测试、packaged smoke、干净 Debian 12 安装、SHA256 与双平台一致性门禁。两平台全部通过后才更新 fork Release 与既有兼容清单，不自动安装或重启客户端。
 
@@ -59,7 +61,7 @@ Linux 的依赖安装、原生模块重编译和打包均在 `node:22-bookworm`�
 
 上游暂存最长等待约 75 分钟，安装包各 job 保留原 timeout；超时不是完成。控制器必须读取最终 run、Release、实际 tag SHA、双平台资产和更新清单，再报告发布成功。GitHub Actions 日志/摘要是机器失败信号，不代表聊天通知已发送；通知由统一控制器在确认结果后发出。
 
-main 上仍保留显式手动发布入口：取消默认开启的 `validate_only`，也必须通过同源码完整 CI。候选分支保留 `validate_only` 时只上传 Artifact，绝不改变安装中的版本或更新指针。一次性请求分支不可改指向或强推复用；保留它们便于追踪原运行，不自动清理用户分支。
+main 上仍保留显式手动发布入口：取消默认开启的 `validate_only`，也必须通过同源码的 `Windows/Linux release-ready` 检查。候选分支保留 `validate_only` 时只上传 Artifact，绝不改变安装中的版本或更新指针。一次性请求分支不可改指向或强推复用；保留它们便于追踪原运行，不自动清理用户分支。
 
 ## 使用前
 
