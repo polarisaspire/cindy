@@ -5,10 +5,12 @@ import { filterDirectSdp, isBlockedDirectAddress } from './directCandidatePolicy
 
 /** Data-only WebRTC, shared by Electron and the isolated Mobile WebView. No STUN/TURN:
  * host candidates try the LAN, and the existing authenticated relay is the fallback.
- * Binary fragments preserve UTF-8 (including surrogate pairs) across 16 KiB SCTP limits. */
-export function createDirectRtcRuntime(): DirectRuntime {
+ * Binary fragments preserve UTF-8 (including surrogate pairs) across 16 KiB SCTP limits.
+ * A local traffic observer owns closing the peer connection after its final reading. */
+export function createDirectRtcRuntime(observe?: (pc: RTCPeerConnection) => () => void): DirectRuntime {
   return { create(_id: string, events: DirectRuntimeEvents): DirectRuntimeSession {
     const pc = new RTCPeerConnection({ iceServers: [] });
+    const closePeer = observe?.(pc) ?? (() => pc.close());
     let dc: RTCDataChannel | undefined;
     let closed = false;
     let receiveBytes = 0;
@@ -28,7 +30,7 @@ export function createDirectRtcRuntime(): DirectRuntime {
       if (iceTransport) iceTransport.onselectedcandidatepairchange = null;
       parts = [];
       dc?.close();
-      pc.close();
+      closePeer();
       events.closed(reason);
     };
     const selectedPathAllowed = () => {
