@@ -178,6 +178,7 @@ describeMigrationReplay('existing side-chat teams', () => {
         CREATE TABLE migration_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE migration_history (seq INTEGER PRIMARY KEY, file_name TEXT NOT NULL, content_hash TEXT NOT NULL, applied_at INTEGER NOT NULL);
         CREATE TABLE schedules (id TEXT PRIMARY KEY);
+        INSERT INTO schedules (id) VALUES ('existing-schedule');
         CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, status TEXT, sdk_session_id TEXT, orca_role TEXT);
         CREATE TABLE orca_teams (id TEXT PRIMARY KEY, lead_session_id TEXT, status TEXT);
         CREATE TABLE orca_workers (id TEXT PRIMARY KEY, team_id TEXT);
@@ -196,10 +197,14 @@ describeMigrationReplay('existing side-chat teams', () => {
         '0158_close_linked_side_chat.sql',
         '0159_restore_native_usage_currency.sql',
         '0160_native_usage_amount_metadata.sql',
+        '0161_schedule_model_group.sql',
       ]);
+      expect(columnNames(db, 'schedules')).toContain('model_group');
       expect(columnNames(db, 'schedules')).toContain('primary_host_key');
       const reopened = createBetterSqliteDatabase(db.name);
       try {
+        expect(reopened.prepare("SELECT id, model_group FROM schedules WHERE id = 'existing-schedule'").get())
+          .toEqual({ id: 'existing-schedule', model_group: null });
         expect(reopened.prepare("SELECT side_chat_promoted FROM sessions WHERE id = 'live'").pluck().get()).toBe(1);
         // DB recovery tier: a second worker committed after migration, before the
         // process could publish its lead. Reopening must repair only that lead.
@@ -427,7 +432,7 @@ describeMigrationReplay('migration replay', () => {
         const result = runMigrationReplay(db, { drizzleDir: drizzleDir(), currentVersion: 124 });
         expect(result.applied.map((migration) => migration.seq)).toEqual([
           125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,
-          143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160,
+          143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161,
         ]);
         expect(columnNames(db, 'chat_cache_rooms')).toEqual(['namespace', 'room_id', 'state', 'version']);
         expect(columnNames(db, 'sessions')).toContain('scheduled_model_baseline');
@@ -607,7 +612,7 @@ describeMigrationReplay('migration replay', () => {
       db.exec(readFileSync(path.join(drizzleDir(), '0045_living_namor.sql'), 'utf-8'));
       const result = runMigrationReplay(db, { drizzleDir: drizzleDir(), currentVersion: 129 });
       expect(result.applied.map((migration) => migration.seq)).toEqual([
-        130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160,
+        130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161,
       ]);
       expect(columnNames(db, 'sessions')).toContain('notifications_muted');
       // 存量任务全部回填为「未静音」：升级不能替用户少发提醒。

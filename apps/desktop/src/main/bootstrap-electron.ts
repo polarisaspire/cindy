@@ -498,7 +498,7 @@ import { createIpcChannelUsage, registeredIpcChannels, tapIpcChannelUsage } from
 import { hasRecentWorkdir, listRecentWorkdirs } from './localDb/ipc/recentWorkdirs';
 import { getActiveCatalog } from './maker-host/active-catalog';
 import { resolveSessionContextWindow } from '../shared/sessionContextWindow';
-import { resumeDeletedPiSubagentCleanup } from './localDb/ipc/sessions';
+import { resumeDeletedPiSubagentCleanup, setWorktreePathInDb } from './localDb/ipc/sessions';
 import {
   didMigrateLegacyDataForUser,
   registerLegacyMigrationIpc,
@@ -725,7 +725,8 @@ import { agentNetSwitchRemoteHandler, registerSelfHostedRelayIpc } from './devic
 import { registerProviderGroupIpc } from './provider-group/ipc.js';
 import { registerSubscriptionAccountsIpc } from './subscription-accounts/ipc.js';
 import { startUpgradeSplitRepair } from './subscription-accounts/upgradeSplitRepair.desktop.js';
-import { acquireSubscriptionAccount, attachDefaultSubscriptionPool, disconnectSubscriptionPool } from './subscription-accounts/runtime.js';
+import { acquireSubscriptionAccount, attachDefaultSubscriptionPool, disconnectSubscriptionPool, hasCreatedOpenAiImageAuth } from './subscription-accounts/runtime.js';
+import { resolveSubscriptionPoolProvider } from './subscription-accounts/placement.js';
 import { registerProviderGroupRemoteHandler } from './provider-group/remoteRegistration.js';
 import { providerGroupReshare, registerProviderGroupReshare } from './provider-group/reshareRuntime.js';
 import {
@@ -752,6 +753,7 @@ import { registerRemoteResourcesIpc } from './device-link/remoteResourcesIpc';
 // worktree-parallel-sessions: IPC 注册 + close-session 内的 fire-and-forget 删除钩子
 import {
   registerWorktreeIpc,
+  configureWorktreeStoreDbSync,
   WorktreeManager,
   WorktreePool,
   reconcilePendingSafeDirectoryCleanups,
@@ -1278,7 +1280,7 @@ import {
   getLiveScreenHost,
   pluginLiveScreenViews,
 } from './cindy-brain/index.js';
-import { setCodexImageAuthBinding } from './cindy-brain/codexImageAuthBinding.js';
+import { createCodexImageAuthAcquirer, setCodexImageAuthBinding } from './cindy-brain/codexImageAuthBinding.js';
 import { configureMailAttachmentHost } from './cindy-brain/mailAttachmentUpload.js';
 import { writeTempFile, materializeDirectSendOssAttachments } from './maker-ipc/normalizeAttachments.desktop.js';
 import { listActiveClaudeBackgroundActivitySessions } from './maker-host/claude-session-background-activity.js';
@@ -1301,6 +1303,8 @@ import { getResolvedMainLocale, setMainClassicalStyle, setMainLocale, t } from '
 import { isClassicalReplyStyle } from '@cindy/maker-shared/classical-reply';
 import { registerModelGroupDecisionIpc } from './model-groups/decisionIpc.js';
 import { registerModelGroupsIpc } from './model-groups/ipc.js';
+import { registerFeishuGroupSettingsIpc } from './im/feishu/groupSettingsIpc.js';
+import { wireFeishuGroupProjectPorts } from './im/feishu/groupProjectPortsWiring.js';
 import { requireObject, requireString, throwIpcError } from './utils/ipcValidate.js';
 import { pickNativeAtResource } from './nativeAtResourcePicker.js';
 // Scheduler (Phase 3) — 启动单例需要 maker / localDb / mainWindow 都 ready，但
@@ -2083,6 +2087,8 @@ configureMigrationRuntime({
   isPackaged: app.isPackaged,
 });
 configureSqliteVecExtPath(resolveDesktopSqliteVecExtPath(app.isPackaged));
+// The Worktree registry keeps sessions.worktree_path as a denormalized snapshot.
+configureWorktreeStoreDbSync(setWorktreePathInDb);
 // Database startup reaches the user through these ports; the Node host installs
 // headless equivalents instead of importing Electron.
 configureUiText((key, fallback) => {
@@ -3072,27 +3078,12 @@ registerLayoutIpc();
 // 图片通道的 ChatGPT 鉴权必须由 Main 静态装配；禁止在请求时 import maker-host
 // 生成延迟 chunk（Main bundle 反向 require 会重复执行启动副作用）。
 setCodexImageAuthBinding({
-  async acquireRemoteAuth(providerId, modelId) {
-    const lease = await acquireSubscriptionAccount(providerId, modelId, [], false, { remote: true, capability: 'image.generate' });
-    let proof: (() => boolean) | undefined;
-    return {
-      async getAuth() {
-        const auth = await getChatgptBridgeAuthForDispatch(providerId, lease?.account);
-        proof = auth.canDispatch;
-        return auth;
-      },
-      assertDispatchable() {
-        lease?.assertDispatchable();
-        if (proof && !proof()) throw new Error('OpenAI authorization changed before dispatch');
-      },
-      async onAuthFailure(failure) {
-        lease?.observeFailure({ errorStatus: failure.status, message: failure.body }, modelId, 'run');
-        await invalidateChatgptBridgeAuth(failure, providerId, lease?.account);
-      },
-      release() { lease?.release(); },
-    };
-  },
+  acquireAuth: createCodexImageAuthAcquirer({
+    resolveSubscriptionPoolProvider, acquireSubscriptionAccount,
+    getChatgptBridgeAuthForDispatch, invalidateChatgptBridgeAuth,
+  }),
   hasAuth: (providerId) => codexAccountState(providerId).authenticated,
+  hasPoolImageAuth: hasCreatedOpenAiImageAuth,
   getAuth: getChatgptBridgeAuth,
   onAuthFailure: invalidateChatgptBridgeAuth,
 });
@@ -5755,6 +5746,8 @@ const registerIpcHandlers = () => {
     }
     return imDefaultSettingsWire(channel);
   });
+  wireFeishuGroupProjectPorts();
+  registerFeishuGroupSettingsIpc();
   registerModelGroupsIpc();
   registerModelGroupDecisionIpc();
   ipcMain.handle(MAKER_IPC_INVOKE.SUBAGENT_MODEL_SETTINGS_GET, async () => {
