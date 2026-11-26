@@ -16,6 +16,7 @@ import { isDeviceLinkRemotePushCurrent } from '../lib/remoteDataOwnerPushFence';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '../contexts/dataOwnerGeneration';
 import { isKimiCodingProviderView } from '../../shared/kimiCodingUsage';
 import { isOpenCodeGoProviderView } from '../../shared/opencodeGoUsage';
+import { canReadMagpieUsage } from '../../shared/magpieUsage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { AgentKind, ProviderView } from '@cindy/model-providers';
@@ -96,7 +97,7 @@ export function useProviderAccountUsage(
   provider: ProviderView | undefined,
   agent?: AgentKind,
   deviceId: string | null = null,
-  options: { live?: boolean; active?: boolean; refreshEpoch?: number } = {},
+  options: { live?: boolean; active?: boolean; refreshEpoch?: number; discoverMagpie?: boolean } = {},
 ): ProviderAccountUsageState {
   const live = options.live === true;
   const active = !live || options.active !== false;
@@ -110,7 +111,8 @@ export function useProviderAccountUsage(
     !!provider && !provider.removed && !provider.suspended && (!structuredQuota || provider.connected) &&
     (!deviceId?.startsWith('share:')) &&
     (structuredQuota
-      || (!deviceId && provider.auth?.method !== 'oauth' && (hasDeepSeekOfficialRouteView(provider) || isZhipuCodingPlanProviderView(provider))));
+      || (!deviceId && provider.auth?.method !== 'oauth' && (hasDeepSeekOfficialRouteView(provider) || isZhipuCodingPlanProviderView(provider)
+        || (options.discoverMagpie === true && canReadMagpieUsage(provider)))));
   const queryIdentity = JSON.stringify([
     owner,
     deviceId,
@@ -227,7 +229,7 @@ export function useProviderAccountUsage(
   }, [lifecycle, queryIdentity]);
 
   useEffect(() => {
-    if (!structuredQuota) return;
+    if (!structuredQuota && !options.discoverMagpie) return;
     const changed = () => {
       lifecycle.liveRefreshes.clear();
       requestId.current += 1;
@@ -238,7 +240,7 @@ export function useProviderAccountUsage(
         && isDeviceLinkRemotePushCurrent(push, stamp)) changed();
     });
     return window.electronAPI.maker.onProvidersChanged?.(changed);
-  }, [structuredQuota, deviceId, lifecycle]);
+  }, [structuredQuota, options.discoverMagpie, deviceId, lifecycle]);
 
   useEffect(() => {
     if (!supported || !active) return;

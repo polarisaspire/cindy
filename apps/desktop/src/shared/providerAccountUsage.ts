@@ -11,6 +11,7 @@
 
 import type { KimiCodingUsageSnapshot } from './kimiCodingUsage';
 import type { OpenCodeGoUsageSnapshot } from './opencodeGoUsage';
+import type { MagpieQuotaSnapshot } from './magpieUsage';
 
 import type { AgentKind, Provider } from '@cindy/model-providers';
 
@@ -56,6 +57,7 @@ export interface DeepSeekAccountUsageSnapshot {
 }
 
 export type ProviderAccountUsageSnapshot =
+  | MagpieQuotaSnapshot
   | DeepSeekAccountUsageSnapshot
   | ZhipuCodingPlanQuotaSnapshot
   | KimiCodingUsageSnapshot
@@ -109,6 +111,8 @@ export type ProviderAccountUsageResult = (
       agent?: AgentKind;
     }
 ) & {
+  /** Self-hosted integration verified by its native response or discovery metadata. */
+  integration?: 'magpie';
   /** 本次实际查询端点对应的官方看板；同样随鉴权等失败结果返回。 */
   dashboardUrl?: string;
 };

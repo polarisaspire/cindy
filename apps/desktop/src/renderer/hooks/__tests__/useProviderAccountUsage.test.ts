@@ -182,11 +182,12 @@ it('keeps an explicit OpenCode refresh newer than an automatic pending read', as
   expect(hook.result.current.result).toEqual(fresh);
 });
 
-it('clears Kimi quota when the host broadcasts a credential change on the same connection', async () => {
+it.each([false, true])('clears quota on a same-connection credential change (Magpie discovery: %s)', async (discoverMagpie) => {
   let changed!: () => void;
   Object.assign(window.electronAPI.maker, { onProvidersChanged: (callback: () => void) => { changed = callback; return () => {}; } });
   fetchUsage.mockResolvedValueOnce(kimiReady).mockImplementationOnce(() => new Promise(() => {}));
-  const hook = renderHook(() => useProviderAccountUsage(kimiProvider, 'pi'));
+  const source = discoverMagpie ? { ...provider, source: 'user', id: 'magpie', routing: { pi: { upstream: 'https://gateway.test/v1' } } } as ProviderView : kimiProvider;
+  const hook = renderHook(() => useProviderAccountUsage(source, 'pi', null, { discoverMagpie }));
   await act(async () => {});
   expect(hook.result.current.result).toEqual(kimiReady);
   act(() => changed());

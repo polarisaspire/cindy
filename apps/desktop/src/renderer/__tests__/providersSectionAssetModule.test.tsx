@@ -248,6 +248,24 @@ afterEach(() => {
 
 // PR #7031: settings and chip must both open the queried account's dashboard.
 // Unit/jsdom, a CN-first configuration whose usable key belongs to Global/Pi.
+// Magpie provider card: existing asset tests only cover official account sources.
+// Unit: a saved custom connection plus native quota must render remaining capacity and refresh.
+it('shows Magpie gateway quota and refreshes through the existing provider query', async () => {
+  const read = vi.fn(async () => ({ status: 'ready', integration: 'magpie', stale: false, snapshot: {
+    kind: 'magpie-quota', fetchedAt: Date.now(), accounts: [{ readAt: Date.now(), error: false,
+      windows: [{ name: 'Gemini · 7 days', remaining: 26, resetsAt: Date.now() + 86400000 }] }],
+  } }));
+  Object.assign(window.electronAPI.maker, { fetchProviderAccountUsage: read });
+  render(<ProviderAccountUsageModule provider={{
+    id: 'gateway', source: 'user', auth: { method: 'apiKey' }, connected: true,
+    routing: { pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' } },
+  } as ProviderView} />);
+  expect(await screen.findByText('Gemini · 7 days')).toBeTruthy();
+  expect(screen.getByText('providerAccountUsage.magpie.scope')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'providerAccountUsage.kimi.refresh' }));
+  await waitFor(() => expect(read).toHaveBeenLastCalledWith(expect.objectContaining({ providerId: 'gateway', forceRefresh: true })));
+});
+
 it.each(['ready', 'unavailable'])('uses the queried dashboard in the settings card (%s)', async (status) => {
   const dashboardUrl = 'https://z.ai/manage-apikey/coding-plan/personal/my-plan';
   Object.assign(window.electronAPI, { openExternal: vi.fn(async () => undefined) });

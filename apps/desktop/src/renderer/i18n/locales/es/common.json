@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Cuota de Magpie",
+      "account": "Cuenta {{number}}",
+      "scope": "Cuota de las cuentas de origen visible con esta clave de la pasarela.",
+      "error": {
+        "no-credentials": "No hay credenciales de Magpie disponibles. Conecta primero este proveedor.",
+        "auth": "Esta clave no puede consultar la cuota de Magpie. Comprueba sus permisos.",
+        "rate-limited": "Magpie está limitando las consultas de cuota. Vuelve a intentarlo más tarde.",
+        "network": "Cindy no puede conectar con Magpie. Verifica la red y vuelve a intentarlo.",
+        "server": "Magpie no puede devolver la cuota en este momento. Vuelve a intentarlo más tarde.",
+        "invalid-response": "Magpie devolvió datos de cuota ilegibles. Vuelve a intentarlo más tarde.",
+        "throttled": "Se acaba de actualizar la cuota. Vuelve a intentarlo un poco más tarde.",
+        "unknown": "Cindy no puede cargar la cuota de Magpie. Vuelve a intentarlo más tarde.",
+        "updating": "La conexión cambió. Actualiza para obtener su cuota."
+      }
+    },
     "kimi": {
       "refresh": "Actualizar cuota",
       "usage": "Ver el uso de Kimi Code",

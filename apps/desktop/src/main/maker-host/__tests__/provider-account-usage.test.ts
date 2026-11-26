@@ -316,6 +316,76 @@ describe('readProviderAccountUsage', () => {
     vi.restoreAllMocks();
   });
 
+  // User-approved Magpie provider card; existing tests cover fixed official endpoints only.
+  // Minimal input: a custom gateway plus its native quotas response. Tier: unit, real query entry.
+  it('reads Magpie quota at the configured gateway, strips account identities, and caches the read', async () => {
+    setAccountUsageProviderReader(() => mkProvider({ id: 'gateway', routing: {
+      pi: { upstream: 'http://gateway.test:3430/proxy/v1', authStrategy: 'api-key-header' },
+    } }));
+    const fetch = vi.fn(async () => jsonRes({ object: 'list', data: [{
+      provider: 'agy-cli', name: 'private-account', user: 'private@example.test', readAt: '2026-11-26T03:00:00Z',
+      windows: [{ name: 'Gemini · 7 days', remaining: 26, resetsAt: '2026-11-30T23:41:36Z' },
+        { name: 'Unknown', remaining: null }],
+    }] }));
+    setAccountUsageFetch(fetch);
+    const result = await readProviderAccountUsage({ providerId: 'gateway' });
+    expect(result).toMatchObject({ status: 'ready', integration: 'magpie', snapshot: {
+      kind: 'magpie-quota', accounts: [{ windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 26 }] }],
+    } });
+    expect(fetch).toHaveBeenCalledWith('http://gateway.test:3430/proxy/v1/magpie/quotas', expect.objectContaining({
+      redirect: 'error', headers: expect.objectContaining({ Authorization: 'Bearer sk-test' }),
+    }));
+    expect(JSON.stringify(result)).not.toMatch(/private-account|private@example|sk-test/);
+    await readProviderAccountUsage({ providerId: 'gateway', forceRefresh: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides unsupported custom endpoints and caches their negative discovery', async () => {
+    setAccountUsageProviderReader(() => mkProvider({ routing: { pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' } } }));
+    const fetch = vi.fn(async () => jsonRes({ error: 'not found' }, 404));
+    setAccountUsageFetch(fetch);
+    expect(await readProviderAccountUsage({ providerId: 'gateway' })).toMatchObject({ status: 'unsupported' });
+    await readProviderAccountUsage({ providerId: 'gateway' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows query authorization failures for a discovered Magpie connection without reusing old quota', async () => {
+    setAccountUsageProviderReader(() => mkProvider({ routing: { pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' } },
+      models: { pi: [{ id: 'm', name: 'M', contextWindow: 1000, efforts: [], defaultEffort: null, discoveredSource: { kind: 'magpie', providerId: 'agy-cli' } }] } }));
+    setAccountUsageFetch(vi.fn(async () => jsonRes({ error: 'private body' }, 403)));
+    expect(await readProviderAccountUsage({ providerId: 'gateway' })).toMatchObject({ status: 'unavailable', integration: 'magpie', error: 'auth' });
+  });
+
+  it('discards a Magpie read if the credential changes before the response arrives', async () => {
+    setAccountUsageProviderReader(() => mkProvider({ routing: { pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' } } }));
+    let key = 'fake-old';
+    setAccountUsageKeyReader(() => key);
+    let reply!: (response: Response) => void;
+    setAccountUsageFetch(vi.fn(() => new Promise<Response>(resolve => { reply = resolve; })));
+    const pending = readProviderAccountUsage({ providerId: 'gateway' });
+    key = 'fake-new';
+    reply(jsonRes({ object: 'list', data: [] }));
+    expect(await pending).toMatchObject({ status: 'unavailable', error: 'updating' });
+  });
+
+  it.each([false, true])('continues discovery and retains permission errors (discovered model metadata: %s)', async (discovered) => {
+    setAccountUsageProviderReader(() => mkProvider({ routing: {
+      'claude-code': { upstream: 'https://other.test/v1', authStrategy: 'api-key-header' },
+      pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' },
+    }, models: discovered ? { pi: [{ id: 'm', name: 'M', contextWindow: 1000, efforts: [], defaultEffort: null, discoveredSource: { kind: 'magpie', providerId: 'agy-cli' } }] } : {} }));
+    let forbidden = false;
+    const fetch = vi.fn(async (input: string | URL | Request) => String(input).includes('other.test')
+      ? jsonRes({}, 404) : forbidden ? jsonRes({}, 403)
+      : jsonRes({ object: 'list', data: [{ windows: [{ name: 'Gemini', remaining: 40 }] }] }));
+    setAccountUsageFetch(fetch);
+    expect(await readProviderAccountUsage({ providerId: 'mixed' })).toMatchObject({ status: 'ready', agent: 'pi' });
+    forbidden = true;
+    for (let retry = 0; retry < 2; retry++) {
+      nowMs += 16_000;
+      expect(await readProviderAccountUsage({ providerId: 'mixed', forceRefresh: true })).toMatchObject({ status: 'unavailable', integration: 'magpie', error: 'auth' });
+    }
+  });
+
   it('shares one official GLM request between the panel and settings for a mixed connection', async () => {
     setAccountUsageProviderReader(() => mkProvider({
       routing: {
@@ -439,6 +509,7 @@ describe('readProviderAccountUsage', () => {
   });
 
   it('returns unsupported when no official route exists', async () => {
+    setAccountUsageFetch(vi.fn(async () => jsonRes({}, 404)));
     setAccountUsageProviderReader(() =>
       mkProvider({ routing: { 'claude-code': { upstream: 'https://proxy.example/v1', authStrategy: 'api-key-header' as const } } }),
     );

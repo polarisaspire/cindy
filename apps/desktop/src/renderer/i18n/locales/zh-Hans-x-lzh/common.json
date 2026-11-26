@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie 限额",
+      "account": "账号 {{number}}",
+      "scope": "此钥所见上游账号之限额。",
+      "error": {
+        "no-credentials": "无可用之 Magpie 凭证，请先连此供方。",
+        "auth": "此钥不可查 Magpie 限额，请核其权。",
+        "rate-limited": "Magpie 限查找限额之频，请稍后再试。",
+        "network": "Cindy 不能连 Magpie，请察网络而后再试。",
+        "server": "Magpie 暂不能回报限额，请稍后再试。",
+        "invalid-response": "Magpie 回报之限额数据不可辨，请稍后再试。",
+        "throttled": "限额方才已重察，请稍后再试。",
+        "unknown": "Cindy 不能载 Magpie 限额，请稍后再试。",
+        "updating": "连接已易，请重察以取限额。"
+      }
+    },
     "kimi": {
       "refresh": "重察限额",
       "usage": "察 Kimi Code 耗用",

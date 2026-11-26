@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie 配额",
+      "account": "账号 {{number}}",
+      "scope": "显示当前网关 Key 可查看的上游账号配额。",
+      "error": {
+        "no-credentials": "没有可用的 Magpie 凭证，请先连接此供应商。",
+        "auth": "此 Key 无法查询 Magpie 配额，请检查查询权限。",
+        "rate-limited": "Magpie 限制了配额查询频率，请稍后重试。",
+        "network": "Cindy 无法连接 Magpie，请检查网络后重试。",
+        "server": "Magpie 暂时无法返回配额，请稍后重试。",
+        "invalid-response": "Magpie 返回了无法识别的配额数据，请稍后重试。",
+        "throttled": "刚刚刷新过配额，请稍后重试。",
+        "unknown": "Cindy 无法加载 Magpie 配额，请稍后重试。",
+        "updating": "连接已变更，请刷新以获取配额。"
+      }
+    },
     "kimi": {
       "refresh": "刷新配额",
       "usage": "查看 Kimi Code 用量",

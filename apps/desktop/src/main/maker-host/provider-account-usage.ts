@@ -1,5 +1,5 @@
 /**
- * provider-account-usage —— 供应商官方余额与订阅配额查询。
+ * provider-account-usage —— 供应商余额与订阅配额查询。
  *
  * 设计要点：
  *   - **端点钉死在 main**：integration 表是硬编码的官方端点（deepseek →
@@ -9,6 +9,8 @@
  *     origin 一致且鉴权方式是 apiKey 时才启用；Kimi Code 也接受宿主保存的 OAuth，
  *     且仅认领官方 Coding 路径。走代理 / 自定义域名的连接不查（key 属于
  *     代理，不属于官方账户）；这也让官方预设创建的老连接无需迁移就能直接生效。
+ *   - 自定义 API Key 连接可另走 Magpie 原生接口发现，地址只取已保存的同源配置，
+ *     保留反向代理路径前缀，不跟随重定向。该路径不认领为任何官方供应商。
  *   - **key 读取器注入**：同 provider-diagnostics 的 setDiagnosticsKeyReader 模式，模块
  *     不直接 import safeStorage（maker-host 不触电 Electron），host 注册期接通。
  *   - 查询型结果：失败不 throw，映射为 ProviderAccountUsageError（规则 13 例外条款）。
@@ -17,6 +19,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { parseMagpieQuota } from '../../shared/magpieUsage.js';
+import { readMagpieAccountUsage, resetMagpieAccountUsage } from './magpie-account-usage.js';
 
 import type { AgentKind, Provider } from '@cindy/model-providers';
 
@@ -406,7 +410,7 @@ async function fetchZhipuCodingPlanQuota(
 }
 
 async function fetchAccountJson<T>(
-  resolution: ProviderAccountUsageResolution,
+  resolution: Pick<ProviderAccountUsageResolution, 'endpoint'> & Partial<Pick<ProviderAccountUsageResolution, 'integrationId'>>,
   authorization: string,
   parse: (value: unknown, fetchedAt: number) => T,
 ): Promise<T> {
@@ -504,7 +508,12 @@ export async function readProviderAccountUsage(
     if (providerAccountUsageSupported(request.providerId)) {
       return { status: 'unavailable', error: 'no-credentials' };
     }
-    return { status: 'unsupported' };
+    return readMagpieAccountUsage(request, {
+      provider, owner: [ownerStamp, epoch], now: accountUsageNow, current: () => ownerCurrent() && epoch === kimiMutationEpoch,
+      key: agent => keyReader(request.providerId, agent),
+      read: (endpoint, key) => fetchAccountJson({ endpoint }, `Bearer ${key}`, parseMagpieQuota),
+      error: error => error instanceof AccountUsageRequestError ? { code: error.code, retryAt: error.retryAt } : { code: 'network' },
+    });
   }
   const revision = kimi ? String(generation?.revision) : '';
   // The official GLM endpoint returns account-wide quota even when several connections use the key.
@@ -686,6 +695,7 @@ async function readResolvedAccountUsage(
 
 /** 测试辅助：清空缓存与注入重置。 */
 export function resetProviderAccountUsageForTest(): void {
+  resetMagpieAccountUsage();
   cache.clear();
   kimiIdentities.clear();
   quotaInFlight.clear();

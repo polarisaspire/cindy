@@ -257,6 +257,48 @@ function openCardFromHover() {
   return { trigger, card: screen.getByTestId('quota-hover-card') };
 }
 
+// Magpie footer request: the existing provider-detail coverage cannot catch
+// selecting a different model family or querying with the wrong task runtime.
+// Unit/jsdom through the real status chip and its hover card.
+it('shows the selected Magpie model family below the composer and switches with the model', async () => {
+  mocks.providers = [{ id: 'magpie', source: 'user', connected: true, auth: { method: 'apiKey' },
+    routing: { pi: { upstream: 'https://gateway.test/v1' } } } as ProviderView];
+  mocks.fetchProviderAccountUsage.mockResolvedValue({ status: 'ready', integration: 'magpie', stale: false, snapshot: {
+    kind: 'magpie-quota', fetchedAt: Date.now(), accounts: [{ error: false, readAt: Date.now(), windows: [
+      { name: 'Gemini · 7 days', pool: 'gemini', remaining: 26, resetsAt: Date.now() + 4 * 86400000 },
+      { name: 'Claude & GPT · 7 days', pool: 'claude-gpt', remaining: 80, resetsAt: Date.now() + 2 * 86400000 },
+    ] }],
+  } });
+  const view = render(<TodaySpendChip vendorKey="pi" providerId="magpie" modelId="agy-cli/gemini-4-neon" />);
+  await act(async () => {});
+  const trigger = screen.getByTestId('task-usage-trigger');
+  expect(trigger.textContent).toContain('26%');
+  expect(trigger.textContent).not.toContain('80%');
+  expect(mocks.fetchProviderAccountUsage).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'magpie', agent: 'pi' }));
+  view.rerender(<TodaySpendChip vendorKey="pi" providerId="magpie" modelId="agy-cli/claude-sonnet" />);
+  expect(trigger.textContent).toContain('80%');
+  expect(trigger.textContent).not.toContain('26%');
+  const { card } = openCardFromHover();
+  expect(within(card).getByText('Gemini · 7 days')).toBeTruthy();
+  expect(within(card).getByText('Claude & GPT · 7 days')).toBeTruthy();
+  fireEvent.click(within(card).getByRole('button', { name: 'providerAccountUsage.kimi.refresh' }));
+  await act(async () => {});
+  expect(mocks.fetchProviderAccountUsage).toHaveBeenLastCalledWith(expect.objectContaining({ forceRefresh: true, agent: 'pi' }));
+});
+
+it.each(['stale', 'multiple-accounts', 'expired'])('does not invent a Magpie footer percentage for %s quota', async (state) => {
+  mocks.providers = [{ id: 'magpie', source: 'user', connected: true, auth: { method: 'apiKey' },
+    routing: { pi: { upstream: 'https://gateway.test/v1' } } } as ProviderView];
+  const account = { error: false, readAt: Date.now(), windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 26,
+    resetsAt: state === 'expired' ? Date.now() - 1 : Date.now() + 86400000 }] };
+  mocks.fetchProviderAccountUsage.mockResolvedValue({ status: 'ready', integration: 'magpie', stale: state === 'stale', snapshot: {
+    kind: 'magpie-quota', fetchedAt: Date.now(), accounts: state === 'multiple-accounts' ? [account, account] : [account],
+  } });
+  render(<TodaySpendChip vendorKey="pi" providerId="magpie" modelId="agy-cli/gemini-4-neon" />);
+  await act(async () => {});
+  expect(screen.getByTestId('task-usage-trigger').textContent).not.toContain('26%');
+});
+
 beforeEach(() => {
   const history = new QuotaFullCelebrations();
   vi.spyOn(quotaFullCelebrations, 'observe').mockImplementation(history.observe.bind(history));

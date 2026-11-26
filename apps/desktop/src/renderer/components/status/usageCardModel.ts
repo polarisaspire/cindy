@@ -12,6 +12,7 @@ import type {
   ZhipuCodingPlanQuotaSnapshot,
 } from '../../../shared/providerAccountUsage';
 import type { OpenCodeGoUsageSnapshot } from '../../../shared/opencodeGoUsage';
+import type { MagpieQuotaSnapshot } from '../../../shared/magpieUsage';
 import {
   isXaiWeeklyUsageCurrent,
   type XaiSubscriptionUsageSnapshot,
@@ -52,6 +53,24 @@ export interface UsageCardAccount {
   updatedAt?: number | null;
   /** Optional recovery for a failed read; counters and other usage stay intact. */
   refreshFailure?: { retry: () => void; retrying: boolean };
+}
+
+/** Gateway-visible upstream quotas; each account retains its own independent windows. */
+export function buildMagpieUsageCard(snapshot: MagpieQuotaSnapshot | null, t: TFunction): UsageCardAccount {
+  const windows: UsageCardWindow[] = snapshot?.accounts.flatMap((account, index) => account.error ? [] : account.windows.map((window, w) => ({
+    key: `${index}:${w}`,
+    title: snapshot.accounts.length > 1 ? `${t('providerAccountUsage.magpie.account', { number: index + 1 })} · ${window.name}` : window.name,
+    showRemaining: true,
+    window: { utilization: 100 - window.remaining, resetsAt: window.resetsAt === null ? null : window.resetsAt / 1000 },
+  }))) ?? [];
+  const readTimes = snapshot?.accounts.map(account => account.readAt).filter((time): time is number => time !== null) ?? [];
+  return {
+    title: t('providerAccountUsage.magpie.title'), windows,
+    details: [t('providerAccountUsage.magpie.scope')],
+    updatedAt: readTimes.length ? Math.min(...readTimes) : snapshot?.fetchedAt,
+    emptyText: windows.length ? undefined : t(snapshot ? 'quotaCard.noWindows' : 'quotaCard.waiting'),
+    notices: snapshot?.accounts.some(account => account.error) ? [{ text: t('providerAccountUsage.magpie.error.server'), tone: 'warn' }] : [],
+  };
 }
 
 /** Compact surfaces lead with time remaining; round up to minutes and show

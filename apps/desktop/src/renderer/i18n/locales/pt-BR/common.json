@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Cota do Magpie",
+      "account": "Conta {{number}}",
+      "scope": "Cota das contas de origem visível com esta chave do gateway.",
+      "error": {
+        "no-credentials": "Não há credenciais do Magpie disponíveis. Conecte este provedor primeiro.",
+        "auth": "Esta chave não pode consultar a cota do Magpie. Verifique as permissões.",
+        "rate-limited": "O Magpie está limitando as consultas de cota. Tente novamente mais tarde.",
+        "network": "O Cindy não consegue acessar o Magpie. Verifique a rede e tente novamente.",
+        "server": "O Magpie não pode retornar a cota agora. Tente novamente mais tarde.",
+        "invalid-response": "O Magpie retornou dados de cota ilegíveis. Tente novamente mais tarde.",
+        "throttled": "A cota acabou de ser atualizada. Tente novamente daqui a pouco.",
+        "unknown": "O Cindy não consegue carregar a cota do Magpie. Tente novamente mais tarde.",
+        "updating": "A conexão mudou. Atualize para obter a cota dela."
+      }
+    },
     "kimi": {
       "refresh": "Atualizar cota",
       "usage": "Ver uso do Kimi Code",

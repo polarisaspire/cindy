@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Quota Magpie",
+      "account": "Compte {{number}}",
+      "scope": "Quota des comptes en amont accessible avec cette clé de passerelle.",
+      "error": {
+        "no-credentials": "Aucun identifiant Magpie n'est disponible. Connectez d'abord ce fournisseur.",
+        "auth": "Cette clé ne peut pas consulter le quota Magpie. Vérifiez ses autorisations.",
+        "rate-limited": "Magpie limite les demandes de quota. Réessayez plus tard.",
+        "network": "Cindy ne parvient pas à joindre Magpie. Vérifiez le réseau et réessayez.",
+        "server": "Magpie ne peut pas renvoyer le quota pour le moment. Réessayez plus tard.",
+        "invalid-response": "Magpie a renvoyé des données de quota illisibles. Réessayez plus tard.",
+        "throttled": "Le quota vient d'être actualisé. Réessayez un peu plus tard.",
+        "unknown": "Cindy ne parvient pas à charger le quota Magpie. Réessayez plus tard.",
+        "updating": "La connexion a changé. Actualisez pour récupérer son quota."
+      }
+    },
     "kimi": {
       "refresh": "Actualiser le quota",
       "usage": "Voir la consommation Kimi Code",

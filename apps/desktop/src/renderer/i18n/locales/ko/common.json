@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie 할당량",
+      "account": "계정 {{number}}",
+      "scope": "이 게이트웨이 키로 조회할 수 있는 업스트림 계정의 할당량입니다.",
+      "error": {
+        "no-credentials": "Magpie 인증 정보가 없습니다. 먼저 이 제공자에 연결하세요.",
+        "auth": "이 키로 Magpie 할당량을 조회할 수 없습니다. 권한을 확인하세요.",
+        "rate-limited": "Magpie가 할당량 조회를 제한하고 있습니다. 나중에 다시 시도하세요.",
+        "network": "Magpie에 연결할 수 없습니다. 네트워크를 확인한 후 다시 시도하세요.",
+        "server": "Magpie 할당량을 가져올 수 없습니다. 나중에 다시 시도하세요.",
+        "invalid-response": "Magpie 할당량 데이터를 읽을 수 없습니다. 나중에 다시 시도하세요.",
+        "throttled": "할당량을 방금 새로고침했습니다. 잠시 후 다시 시도하세요.",
+        "unknown": "Magpie 할당량을 불러올 수 없습니다. 나중에 다시 시도하세요.",
+        "updating": "연결이 변경되었습니다. 새로고침하여 할당량을 가져오세요."
+      }
+    },
     "kimi": {
       "refresh": "할당량 새로고침",
       "usage": "Kimi Code 사용량 보기",
