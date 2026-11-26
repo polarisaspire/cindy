@@ -1,5 +1,6 @@
 import { isKimiCodingProviderView, kimiUsageWindowMinutes } from '../../../shared/kimiCodingUsage';
 import { isOpenCodeGoProviderView, opencodeGoUsageWindowMinutes } from '../../../shared/opencodeGoUsage';
+import { canReadMagpieUsage, magpieQuotaWindowsForModel } from '../../../shared/magpieUsage';
 import { useCodexRateLimitReset } from '@/hooks/useCodexRateLimitReset';
 import { CodexResetCredits } from './CodexResetCredits';
 import {
@@ -138,6 +139,7 @@ import {
   buildZhipuUsageCard,
   buildKimiUsageCard,
   buildOpenCodeGoUsageCard,
+  buildMagpieUsageCard,
   type UsageCardAccount,
 } from './usageCardModel';
 import { useProviderAccountUsage } from '@/hooks/useProviderAccountUsage';
@@ -1098,7 +1100,8 @@ export function TodaySpendChip({
     !isAnyRemoteSession && Boolean(isZhipuCodingPlanProviderView(selectedQuotaProvider));
   const usesKimiCodingForm = !remoteHostId && !accountUnreadable && isKimiCodingProviderView(selectedQuotaProvider);
   const usesOpenCodeGoForm = !remoteHostId && !accountUnreadable && isOpenCodeGoProviderView(selectedQuotaProvider);
-  const usesProviderAccountUsageForm = usesDeepSeekAccountForm || usesZhipuCodingPlanForm || usesKimiCodingForm || usesOpenCodeGoForm;
+  const usesKnownProviderAccountForm = usesDeepSeekAccountForm || usesZhipuCodingPlanForm || usesKimiCodingForm || usesOpenCodeGoForm;
+  const discoverMagpie = !isAnyRemoteSession && canReadMagpieUsage(selectedQuotaProvider);
   // 会话所在引擎 → 查询用 runtime：同一供应商各引擎可用不同账户的独立密钥，
   // 余额/配额必须对准当前会话实际路由的账户（vendorKey 缺省 = 默认路由，不传）。
   const providerAccountAgent: AgentKind | undefined =
@@ -1110,12 +1113,16 @@ export function TodaySpendChip({
           ? 'pi'
           : undefined;
   const providerAccountUsage = useProviderAccountUsage(
-    usesProviderAccountUsageForm && providerAccountAgent ? selectedQuotaProvider : undefined,
+    (usesKnownProviderAccountForm || discoverMagpie) && providerAccountAgent ? selectedQuotaProvider : undefined,
     providerAccountAgent,
     usesKimiCodingForm || usesOpenCodeGoForm ? accountDeviceId : null,
+    { discoverMagpie },
   );
   const providerAccountSnapshot =
     providerAccountUsage.result?.status === 'ready' ? providerAccountUsage.result.snapshot : null;
+  const usesMagpieForm = discoverMagpie && providerAccountUsage.result?.integration === 'magpie'
+    && providerAccountUsage.result.status !== 'unsupported';
+  const usesProviderAccountUsageForm = usesKnownProviderAccountForm || usesMagpieForm;
   // Model Access 配额只属于实际走 XD/Cindy AI Gateway 的本地会话。显式自定义供应商即使
   // 复用了 env-key / oauth-bearer host，也不能据 host 的启动凭证读取企业账号额度。
   const isClaudeGateway =
@@ -1553,7 +1560,18 @@ export function TodaySpendChip({
 
   // 当前形态下 chip 展示的限额窗口段 (Codex 订阅 / Claude 订阅 / 智谱 Coding Plan 共用结构);
   // 其它形态为空数组, 两个 rollup slot 空转。
-  const chipWindows: ChipWindowSegment[] = usesKimiCodingForm
+  const chipWindows: ChipWindowSegment[] = usesMagpieForm
+    ? (providerAccountSnapshot?.kind === 'magpie-quota' && providerAccountUsage.result?.status === 'ready' && !providerAccountUsage.result.stale
+      ? magpieQuotaWindowsForModel(providerAccountSnapshot, modelId, windowLabelNowMs).map((w, index) => ({
+        key: `${w.pool}:${w.name}:${index}`,
+        label: formatCompactTimeUntilReset(w.resetsAt === null ? null : w.resetsAt / 1000, windowLabelNowMs, t)
+          ?? (w.name.endsWith('7 days') ? t('quotaCard.weeklyLabel') : w.name.endsWith('5 hours') ? t('quotaCard.fiveHourLabel') : w.name),
+        remainingPercent: w.remaining,
+        resetsAtMs: w.resetsAt,
+        resetPending: false,
+        level: quotaLevelFromRemaining(w.remaining),
+      })) : [])
+    : usesKimiCodingForm
     ? (providerAccountSnapshot?.kind === 'kimi-coding-quota' && providerAccountUsage.result?.status === 'ready' && !providerAccountUsage.result.stale
       ? providerAccountSnapshot.windows.slice(0, 2).map(w => ({
         key: w.id,
@@ -1649,7 +1667,9 @@ export function TodaySpendChip({
     isDeviceLinkRemote ? accountDeviceId : 'local',
     providerId ?? (usesCodexQuotaForm ? 'openai' : usesXaiQuotaForm ? 'xai' : 'anthropic'),
   ]);
-  const quotaSnapshotUpdatedAt = usesCodexQuotaForm
+  const quotaSnapshotUpdatedAt = usesMagpieForm
+    ? providerAccountSnapshot?.fetchedAt
+    : usesCodexQuotaForm
     ? accountUsage?.updatedAt
     : usesXaiQuotaForm
       ? xaiSubscriptionUsage?.updatedAt
@@ -1696,6 +1716,7 @@ export function TodaySpendChip({
       && !isClaudeSubscription
       && !usesZhipuCodingPlanForm
       && !usesKimiCodingForm
+      && !usesMagpieForm
       && !quotaPopoverOpen
     ) {
       return undefined;
@@ -1711,6 +1732,7 @@ export function TodaySpendChip({
     isClaudeSubscription,
     usesZhipuCodingPlanForm,
     usesKimiCodingForm,
+    usesMagpieForm,
     quotaPopoverOpen,
     windowLabelNowMs,
     chipResetsAtMsList,
@@ -1834,7 +1856,7 @@ export function TodaySpendChip({
         : null;
     labelNode =
       chipSegments.length > 0 ? (
-        renderSegmentedLabel(chipSegments, isClaudeSubscription)
+        renderSegmentedLabel(chipSegments, isClaudeSubscription || usesMagpieForm)
       ) : codexQuotaEmptyState ? (
         <span className="tabular-nums opacity-60">
           {t(
@@ -1844,12 +1866,14 @@ export function TodaySpendChip({
           )}
         </span>
       ) : (
-        <span className="tabular-nums opacity-60">{DEFAULT_MONEY_SYMBOL}</span>
+        <span className="tabular-nums opacity-60">{usesMagpieForm ? t('providerAccountUsage.magpie.title') : DEFAULT_MONEY_SYMBOL}</span>
       );
     // SSH 远程(remoteHostId)没有账号快照镜像,只显示价值估算;device-link 远程的
     // accountUsage / xai / claude 快照均已在上方切到被控端镜像,与本机同一套卡片渲染。
     if (!remoteHostId) {
-      account = usesKimiCodingForm
+      account = usesMagpieForm
+        ? buildMagpieUsageCard(providerAccountSnapshot?.kind === 'magpie-quota' ? providerAccountSnapshot : null, t)
+        : usesKimiCodingForm
         ? buildKimiUsageCard(providerAccountSnapshot?.kind === 'kimi-coding-quota' ? providerAccountSnapshot : null, t)
         : usesOpenCodeGoForm
         ? buildOpenCodeGoUsageCard(providerAccountSnapshot?.kind === 'opencode-go-quota' ? providerAccountSnapshot : null, t)
@@ -1877,9 +1901,9 @@ export function TodaySpendChip({
                   t,
                 )
               : buildClaudeUsageCard(claudeSubscriptionUsage, t);
-      if ((usesKimiCodingForm || usesOpenCodeGoForm) && providerAccountUsage.result?.status === 'ready' && providerAccountUsage.result.stale) account.notices = [{ text: t('providerAccountUsage.kimi.stale'), tone: 'warn' }];
+      if ((usesMagpieForm || usesKimiCodingForm || usesOpenCodeGoForm) && providerAccountUsage.result?.status === 'ready' && providerAccountUsage.result.stale) account.notices = [{ text: t('providerAccountUsage.kimi.stale'), tone: 'warn' }];
       if (usesProviderAccountUsageForm && providerAccountUsage.result?.status === 'unavailable') {
-        account.emptyText = t(`providerAccountUsage.${usesKimiCodingForm ? 'kimi.' : ''}error.${providerAccountUsage.result.error}`);
+        account.emptyText = t(`providerAccountUsage.${usesMagpieForm ? 'magpie.' : usesKimiCodingForm ? 'kimi.' : ''}error.${providerAccountUsage.result.error}`);
       }
       if (
         !usesProviderAccountUsageForm &&
@@ -2011,7 +2035,7 @@ export function TodaySpendChip({
   // 与 ContextCapacityRing 视觉对齐 (h-5 = 20px) + reset button UA 默认 padding/border。
   // tabular-nums 让 "$306 / $1.2k" 这类数字段的字符宽度等宽, 段间数字落点对齐。
   const buttonClass = cn(
-    isClaudeSubscription
+    isClaudeSubscription || usesMagpieForm
       ? 'inline-flex min-h-5 min-w-0 max-w-full flex-wrap items-center justify-end gap-y-1'
       : 'inline-flex h-5 shrink-0 items-center',
     'text-12 font-medium leading-none tabular-nums',
@@ -2026,7 +2050,7 @@ export function TodaySpendChip({
   return (
     <div
       ref={chipRef}
-      className={cn('inline-flex items-center gap-3', isClaudeSubscription ? 'min-h-5 min-w-0 max-w-full' : 'h-5 shrink-0')}
+      className={cn('inline-flex items-center gap-3', isClaudeSubscription || usesMagpieForm ? 'min-h-5 min-w-0 max-w-full' : 'h-5 shrink-0')}
       onMouseEnter={refreshCodexRateLimits}
       onFocusCapture={(event) => {
         // Focusing Retry inside the portal must not start a read and disable
@@ -2156,6 +2180,7 @@ export function TodaySpendChip({
               </Button>
             ) : null}
           >
+            {usesMagpieForm ? <div className="px-4 py-2"><Button size="sm" variant="secondary" tone="quiet" disabled={providerAccountUsage.busy} onClick={providerAccountUsage.refresh}>{t('providerAccountUsage.kimi.refresh')}</Button></div> : null}
             {sessionId ? <div className="px-4 py-3"><UsageCostDetails rows={costDetails} /></div> : null}
           </QuotaHoverCard>
         </PopoverContent>

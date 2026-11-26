@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie クォータ",
+      "account": "アカウント {{number}}",
+      "scope": "このゲートウェイキーで参照できる上流アカウントのクォータです。",
+      "error": {
+        "no-credentials": "Magpie の認証情報がありません。先にこのプロバイダーを接続してください。",
+        "auth": "このキーでは Magpie クォータを取得できません。権限を確認してください。",
+        "rate-limited": "Magpie がクォータの照会を制限しています。後でもう一度お試しください。",
+        "network": "Magpie に接続できません。ネットワークを確認して再試行してください。",
+        "server": "Magpie のクォータを取得できません。後でもう一度お試しください。",
+        "invalid-response": "Magpie のクォータデータを読み取れません。後でもう一度お試しください。",
+        "throttled": "クォータは更新されたばかりです。少し待って再試行してください。",
+        "unknown": "Magpie のクォータを読み込めません。後でもう一度お試しください。",
+        "updating": "接続が変更されました。更新してクォータを取得してください。"
+      }
+    },
     "kimi": {
       "refresh": "クォータを更新",
       "usage": "Kimi Code の使用量を表示",

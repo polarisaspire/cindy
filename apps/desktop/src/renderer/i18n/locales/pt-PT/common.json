@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Quota do Magpie",
+      "account": "Conta {{number}}",
+      "scope": "Quota das contas a montante visível com esta chave do gateway.",
+      "error": {
+        "no-credentials": "Não existem credenciais do Magpie disponíveis. Ligue primeiro este fornecedor.",
+        "auth": "Esta chave não pode consultar a quota do Magpie. Verifique as permissões.",
+        "rate-limited": "O Magpie está a limitar as consultas de quota. Tente mais tarde.",
+        "network": "O Cindy não consegue contactar o Magpie. Verifique a rede e tente novamente.",
+        "server": "O Magpie não consegue devolver a quota neste momento. Tente mais tarde.",
+        "invalid-response": "O Magpie devolveu dados de quota ilegíveis. Tente mais tarde.",
+        "throttled": "A quota acabou de ser atualizada. Tente daqui a pouco.",
+        "unknown": "O Cindy não consegue carregar a quota do Magpie. Tente mais tarde.",
+        "updating": "A ligação mudou. Atualize para obter a respetiva quota."
+      }
+    },
     "kimi": {
       "refresh": "Atualizar quota",
       "usage": "Ver utilização do Kimi Code",

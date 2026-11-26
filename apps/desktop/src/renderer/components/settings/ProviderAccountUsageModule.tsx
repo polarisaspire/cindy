@@ -9,6 +9,7 @@
 
 import { isKimiCodingProviderView } from '../../../shared/kimiCodingUsage';
 import { isOpenCodeGoProviderView } from '../../../shared/opencodeGoUsage';
+import { canReadMagpieUsage } from '../../../shared/magpieUsage';
 import { useTranslation } from 'react-i18next';
 
 import type { ProviderView } from '@cindy/model-providers';
@@ -21,7 +22,7 @@ import {
 import { useProviderAccountUsage } from '../../hooks/useProviderAccountUsage';
 import { Button } from '../ui/button';
 import { QuotaHoverCard } from '../status/QuotaHoverCard';
-import { buildDeepSeekUsageCard, buildZhipuUsageCard, buildKimiUsageCard, buildOpenCodeGoUsageCard } from '../status/usageCardModel';
+import { buildDeepSeekUsageCard, buildZhipuUsageCard, buildKimiUsageCard, buildOpenCodeGoUsageCard, buildMagpieUsageCard } from '../status/usageCardModel';
 
 export function ProviderAccountUsageModule({ provider }: { provider?: ProviderView }) {
   const { t, i18n } = useTranslation();
@@ -30,15 +31,19 @@ export function ProviderAccountUsageModule({ provider }: { provider?: ProviderVi
   const zhipu = isZhipuCodingPlanProviderView(provider);
   const kimi = isKimiCodingProviderView(provider);
   const opencodeGo = isOpenCodeGoProviderView(provider);
-  const usage = useProviderAccountUsage(deepSeek || zhipu || kimi || opencodeGo ? provider : undefined);
+  const usage = useProviderAccountUsage(deepSeek || zhipu || kimi || opencodeGo || canReadMagpieUsage(provider) ? provider : undefined,
+    undefined, null, { discoverMagpie: true });
+  const magpie = usage.result?.integration === 'magpie' && usage.result.status !== 'unsupported';
   const dashboardUrl = usage.result?.dashboardUrl ?? getProviderAccountUsageDashboardUrlView(provider);
-  if (!deepSeek && !zhipu && !kimi && !opencodeGo) return null;
+  if (!deepSeek && !zhipu && !kimi && !opencodeGo && !magpie) return null;
   const snapshot = usage.result?.status === 'ready' ? usage.result.snapshot : null;
   const errorText =
     usage.result?.status === 'unavailable'
-      ? t(`providerAccountUsage.${kimi ? 'kimi.' : ''}error.${usage.result.error}`)
+      ? t(`providerAccountUsage.${magpie ? 'magpie.' : kimi ? 'kimi.' : ''}error.${usage.result.error}`)
       : null;
-  const account = kimi
+  const account = magpie
+    ? buildMagpieUsageCard(snapshot?.kind === 'magpie-quota' ? snapshot : null, t)
+    : kimi
     ? buildKimiUsageCard(snapshot?.kind === 'kimi-coding-quota' ? snapshot : null, t)
     : opencodeGo
     ? buildOpenCodeGoUsageCard(snapshot?.kind === 'opencode-go-quota' ? snapshot : null, t)
@@ -47,7 +52,7 @@ export function ProviderAccountUsageModule({ provider }: { provider?: ProviderVi
     : buildZhipuUsageCard(snapshot?.kind === 'zhipu-coding-plan-quota' ? snapshot : null, t);
   if (errorText && !snapshot) account.emptyText = errorText;
   // 余额来自哪个引擎的密钥：同一供应商各引擎可用不同账户，标注免得用户误读。
-  if (!kimi && usage.result?.status === 'ready' && usage.result.agent) {
+  if (!magpie && !kimi && usage.result?.status === 'ready' && usage.result.agent) {
     account.identity ??=
       usage.result.agent === 'claude-code'
         ? 'Claude Code'
@@ -56,7 +61,7 @@ export function ProviderAccountUsageModule({ provider }: { provider?: ProviderVi
           : 'Pi';
   }
 
-  if ((kimi || opencodeGo) && usage.result?.status === 'ready' && usage.result.stale) {
+  if ((magpie || kimi || opencodeGo) && usage.result?.status === 'ready' && usage.result.stale) {
     account.notices = [{ text: t('providerAccountUsage.kimi.stale'), tone: 'warn' }];
   }
 
@@ -69,10 +74,10 @@ export function ProviderAccountUsageModule({ provider }: { provider?: ProviderVi
       <QuotaHoverCard
         variant="embedded"
         account={account}
-        dashboardLabel={opencodeGo ? undefined : kimi ? t('providerAccountUsage.kimi.usage') : deepSeek ? t('providerAccountUsage.openDashboard') : t('providerAccountUsage.zhipuCodingPlan.usage')}
-        onOpenDashboard={!opencodeGo && dashboardUrl ? () => void window.electronAPI.openExternal(dashboardUrl) : undefined}
+        dashboardLabel={magpie || opencodeGo ? undefined : kimi ? t('providerAccountUsage.kimi.usage') : deepSeek ? t('providerAccountUsage.openDashboard') : t('providerAccountUsage.zhipuCodingPlan.usage')}
+        onOpenDashboard={!magpie && !opencodeGo && dashboardUrl ? () => void window.electronAPI.openExternal(dashboardUrl) : undefined}
       >
-        {(kimi || opencodeGo) && <div className="px-4 pb-2"><Button variant="secondary" tone="quiet" size="sm" disabled={usage.busy} onClick={usage.refresh}>{t('providerAccountUsage.kimi.refresh')}</Button></div>}
+        {(magpie || kimi || opencodeGo) && <div className="px-4 pb-2"><Button variant="secondary" tone="quiet" size="sm" disabled={usage.busy} onClick={usage.refresh}>{t('providerAccountUsage.kimi.refresh')}</Button></div>}
       </QuotaHoverCard>
     </div>
   );

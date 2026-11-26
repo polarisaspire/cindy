@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie 配額",
+      "account": "帳號 {{number}}",
+      "scope": "顯示目前閘道 Key 可查看的上游帳號配額。",
+      "error": {
+        "no-credentials": "沒有可用的 Magpie 憑證，請先連接此供應商。",
+        "auth": "此 Key 無法查詢 Magpie 配額，請檢查查詢權限。",
+        "rate-limited": "Magpie 限制了配額查詢頻率，請稍後重試。",
+        "network": "Cindy 無法連接 Magpie，請檢查網路後重試。",
+        "server": "Magpie 暫時無法回傳配額，請稍後重試。",
+        "invalid-response": "Magpie 回傳了無法辨識的配額資料，請稍後重試。",
+        "throttled": "剛剛重新整理過配額，請稍後重試。",
+        "unknown": "Cindy 無法載入 Magpie 配額，請稍後重試。",
+        "updating": "連線已變更，請重新整理以取得配額。"
+      }
+    },
     "kimi": {
       "refresh": "重新整理配額",
       "usage": "查看 Kimi Code 用量",

@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie-Kontingent",
+      "account": "Konto {{number}}",
+      "scope": "Kontingent der vorgelagerten Konten, das mit diesem Gateway-Schlüssel sichtbar ist.",
+      "error": {
+        "no-credentials": "Keine Magpie-Zugangsdaten verfügbar. Verbinde zuerst diesen Anbieter.",
+        "auth": "Dieser Schlüssel kann das Magpie-Kontingent nicht abfragen. Prüfe seine Berechtigungen.",
+        "rate-limited": "Magpie begrenzt Kontingentabfragen. Versuche es später erneut.",
+        "network": "Cindy kann Magpie nicht erreichen. Prüfe das Netzwerk und versuche es erneut.",
+        "server": "Magpie kann das Kontingent derzeit nicht zurückgeben. Versuche es später erneut.",
+        "invalid-response": "Magpie hat unlesbare Kontingentdaten zurückgegeben. Versuche es später erneut.",
+        "throttled": "Das Kontingent wurde gerade aktualisiert. Versuche es etwas später erneut.",
+        "unknown": "Cindy kann das Magpie-Kontingent nicht laden. Versuche es später erneut.",
+        "updating": "Die Verbindung hat sich geändert. Aktualisiere die Ansicht, um ihr Kontingent abzurufen."
+      }
+    },
     "kimi": {
       "refresh": "Kontingent aktualisieren",
       "usage": "Kimi Code-Nutzung anzeigen",

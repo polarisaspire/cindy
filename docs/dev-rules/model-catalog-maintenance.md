@@ -48,6 +48,28 @@ Server 随包 / 远程目录 → /api/model-catalog/catalog
 聊天调用目标为「连接 ID + 上游模型 ID + 引擎」。同品牌多账号共用资料，凭证、发现、用量和覆盖按连接隔离。
 Mobile / device-link 使用执行端目录；本地安装状态来自执行机器。目录声明不等于账号准入或协议已实现。
 
+### 自建 Magpie 供应商配额
+
+Desktop 本机供应商详情复用 `ProviderAccountUsageModule` 显示 Magpie 的上游账号窗口，
+不是个人 Key 的余额。官方账户查询优先；其余用户自定义 API Key 连接按已保存的地址，
+尝试同源 `/v1/magpie/quotas`（保留反向代理前缀），使用该引擎已保存的 Key，不跟随重定向。
+这不会添加凭证或自动修改供应商设置。有效原生响应或模型发现中的 Magpie 标记用于识别；
+未知接口不显示卡片。曾确认的 Magpie 连接查询失败后保留错误与刷新入口。
+
+窗口只显示接口提供的剩余百分比与重置时间，不累加不同账号或计费窗口；缺失数据不估算为零。
+账号邮箱、名字与原始错误不进入界面。显示原生 `readAt`；失败保留的快照标为旧数据，
+鉴权失败清除旧快照。成功和不支持结果缓存五分钟，刷新至少间隔十五秒，遵循 Retry-After；
+已有详情页观察器每分钟读取缓存，不增加后台轮询。修改连接或凭证时清掉界面旧结果，
+主进程按账号代次、连接配置和凭证隔离缓存，丢弃已失效的在途结果。
+
+输入框下方的 `TodaySpendChip` 复用同一查询，按当前任务的供应商和引擎取凭证。
+单个上游账号且窗口与当前模型的原生 pool（Gemini / Claude & GPT）匹配时显示剩余比例；
+过期、旧快照、未知模型池或多个上游账号不生成合计百分比，悬浮卡仍可查看各账号窗口并刷新。
+不新增跨设备协议；手机、远程与分享连接仍沿用各自既有支持范围。
+实现见 `maker-host/magpie-account-usage.ts`、`shared/magpieUsage.ts`，
+回归见 `provider-account-usage.test.ts`、`useProviderAccountUsage.test.ts` 和
+`providersSectionAssetModule.test.tsx`。
+
 ### 配置包含什么
 
 Server 正本现为 `model-access-server/catalog/source/` 分片，由

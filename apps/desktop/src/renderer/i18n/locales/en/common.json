@@ -39,6 +39,22 @@
     }
   },
   "providerAccountUsage": {
+    "magpie": {
+      "title": "Magpie quota",
+      "account": "Account {{number}}",
+      "scope": "Upstream account quota visible to this gateway key.",
+      "error": {
+        "no-credentials": "No Magpie credentials are available. Connect this provider first.",
+        "auth": "This key cannot query Magpie quota. Check its permissions.",
+        "rate-limited": "Magpie is limiting quota queries. Retry later.",
+        "network": "Cindy cannot reach Magpie. Check the network and retry.",
+        "server": "Magpie cannot return quota right now. Retry later.",
+        "invalid-response": "Magpie returned unreadable quota data. Retry later.",
+        "throttled": "Quota was just refreshed. Retry a bit later.",
+        "unknown": "Cindy cannot load Magpie quota. Retry later.",
+        "updating": "The connection changed. Refresh to retrieve its quota."
+      }
+    },
     "kimi": {
       "refresh": "Refresh quota",
       "usage": "View Kimi Code usage",
