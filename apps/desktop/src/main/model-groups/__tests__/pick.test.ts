@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ProviderView } from '@cindy/model-providers';
 
+import { parseMagpieQuota } from '../../../shared/magpieUsage.js';
 import {
   modelGroupAutoSwitchFor,
   modelGroupAutoSwitchOn,
@@ -104,6 +105,8 @@ describe('pickModelGroupCandidate', () => {
   it.each([
     ['a subscription with quota left costs nothing extra', [fact([week(26, 100)]), priced(15), priced(3)], 0, 'cheapestFree'],
     ['an exhausted subscription falls to the lowest listed price', [fact([week(100, 10)]), priced(15), priced(3)], 2, 'cheapest'],
+    ['a Magpie source with quota left still uses its listed price',
+      [priced(15, { windows: [week(26, 100)], meteredQuota: true }), priced(3), priced(null)], 1, 'cheapest'],
     ['an unknown price ranks after known ones; ties keep list order', [priced(null), priced(15), priced(15)], 1, 'cheapest'],
     ['with no price known it only takes the first, not "cheapest"', [priced(null), priced(null), priced(null)], 0, 'order'],
   ] as const)('cheapest: %s', (_name, facts, index, why) => {
@@ -141,6 +144,63 @@ describe('createModelGroupResolver', () => {
     quotaWindows: async () => new Map([['a', [week(26, 100)]], ['b', [week(39, 20)]]]),
     scope: () => 'owner',
     now: () => now,
+  });
+
+  // Unit regression for model-groups.md §3: two Magpie connections have no
+  // overview entries. Previous headroom tests injected subscription windows only.
+  it.each([
+    { first: 20, second: 70, stale: false, expected: 'b', why: 'headroom', used: 30 },
+    { first: null, second: 70, stale: false, expected: 'b', why: 'headroom', used: 30 },
+    { first: 20, second: 70, stale: true, expected: 'a', why: 'headroom', used: 80 },
+    { first: null, second: 70, stale: true, expected: 'a', why: 'order', used: null },
+    { first: 20, second: 'timeout', stale: false, expected: 'a', why: 'headroom', used: 80 },
+    { first: 20, second: 70, stale: false, shortExhausted: true, expected: 'a', why: 'headroom', used: 80 },
+  ])('routes by the usable Magpie windows ($first, $second; stale: $stale)', async ({ first, second, stale, shortExhausted, expected, why, used }) => {
+    const model = 'agy-cli/gemini-4-neon';
+    const candidates = [
+      { agentKind: 'cc', providerId: 'a', model },
+      { agentKind: 'pi', providerId: 'b', model },
+    ] as const;
+    const views = candidates.map((candidate) => {
+      const agent = candidate.agentKind === 'cc' ? 'claude-code' : 'pi';
+      return {
+        ...view(candidate.providerId, candidate.providerId), agents: [agent],
+        auth: { method: 'apiKey' }, routing: { [agent]: { enabled: true } },
+        models: { [agent]: [{ ...view('a', 'A').models.codex![0], id: model, catalogPresetId: 'magpie' }] },
+      } as ProviderView;
+    });
+    const readLocalMagpieUsage: NonNullable<Parameters<typeof createModelGroupResolver>[0]['readLocalMagpieUsage']> = async ({ providerId, agent }) => {
+      const remaining = providerId === 'a' && agent === 'claude-code' ? first
+        : providerId === 'b' && agent === 'pi' ? second : null;
+      if (remaining === null) return { status: 'unavailable', error: 'network' };
+      if (remaining === 'timeout') return new Promise(() => {});
+      return {
+        status: 'ready', integration: 'magpie', stale: providerId === 'b' && stale,
+        agent, snapshot: parseMagpieQuota({ object: 'list', data: [{
+          provider: 'agy-cli', windows: [
+            { name: 'Gemini · 7 days', remaining, resetsAt: new Date(NOW + 24 * HOUR).toISOString() },
+            { name: 'Gemini · 5 hours', remaining: providerId === 'a' ? 99 : shortExhausted ? 0 : 5 },
+            { name: 'Claude & GPT · 7 days', remaining: 0 },
+          ],
+        }, { provider: 'other-gemini', windows: [{ name: 'Gemini · 7 days', remaining: 0 }] }] }, NOW),
+      };
+    };
+    const resolver = createModelGroupResolver({
+      config: () => ({ routes: [{ ...route('headroom'), candidates: [...candidates] }] }),
+      views: async () => views, agents: () => ['claude-code', 'pi'], harnessInstalled: async () => true,
+      quotaWindows: async () => new Map(), readLocalMagpieUsage, scope: () => 'owner', now: () => NOW,
+    });
+    vi.useFakeTimers();
+    try {
+      const pending = resolver.resolve({ selection: { type: 'route', id: 'r1' }, dryRun: true });
+      await vi.advanceTimersByTimeAsync(MODEL_GROUP_REMOTE_WAIT_MS);
+      expect(await pending).toMatchObject({
+        outcome: 'routed', route: { providerId: expected }, why,
+        quota: used === null ? null : { usedPercent: used, windowMs: WEEK },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('advances rotation only after adoption, not on cancelled picks or previews (#10240)', async () => {

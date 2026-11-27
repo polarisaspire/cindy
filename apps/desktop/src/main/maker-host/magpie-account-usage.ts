@@ -14,6 +14,9 @@ interface Context {
 }
 const cache = new Map<string, { result: ProviderAccountUsageResult; verified: boolean; expiresAt: number; retryAt: number; attemptedAt: number }>();
 const pending = new Map<string, Promise<ProviderAccountUsageResult>>();
+// Opening the model groups page can preview multiple routes at once.
+const MAX_PENDING = 16;
+const MAX_CACHED = 512;
 export function resetMagpieAccountUsage(): void { cache.clear(); pending.clear(); }
 
 /** Native self-hosted gateway fallback; official integrations retain priority. */
@@ -42,6 +45,7 @@ export async function readMagpieAccountUsage(request: ProviderAccountUsageReques
     }
     let work = pending.get(identity);
     if (!work) {
+      if (pending.size >= MAX_PENDING) return { status: 'unavailable', integration: 'magpie', error: 'throttled' };
       work = (async (): Promise<ProviderAccountUsageResult> => {
         let result: ProviderAccountUsageResult;
         let retryAt = 0;
@@ -60,6 +64,7 @@ export async function readMagpieAccountUsage(request: ProviderAccountUsageReques
         const resets = result.status === 'ready' && result.snapshot.kind === 'magpie-quota'
           ? result.snapshot.accounts.flatMap(account => account.windows.map(window => window.resetsAt)).filter((reset): reset is number => reset !== null && reset > time) : [];
         const ttl = result.status === 'unavailable' || (result.status === 'ready' && result.stale) ? 15_000 : 300_000;
+        if (!cache.has(identity) && cache.size >= MAX_CACHED) cache.delete(cache.keys().next().value!);
         cache.set(identity, { result, verified: known || old?.verified === true || result.status === 'ready', attemptedAt: time, expiresAt: Math.min(time + ttl, ...resets), retryAt });
         return result;
       })();

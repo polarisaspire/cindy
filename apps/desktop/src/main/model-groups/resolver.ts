@@ -1,6 +1,7 @@
 /**
  * 把选中的路线解析成一个现在能用的具体模型。事实全部来自已有来源：供应商目录决定能不能选，
- * 额度总览给出订阅窗口；这里不发模型请求、不读凭证。读不到额度的来源按未知处理，不当作没用过。
+ * 额度总览给出订阅窗口，本机 Magpie 复用供应商的只读额度查询；这里不发模型请求、不读凭证。
+ * 读不到额度的来源按未知处理，不当作没用过。
  * 在另一台电脑或分享来的来源按它自己那个位置的目录判断(与插件卡片里的远程模型同一判断)，
  * 读位置与远程目录有时限，读不到就算这个来源不可用；路线里没有这种来源时不读。
  */
@@ -8,8 +9,10 @@ import { randomUUID } from 'node:crypto';
 import { isByokProviderId, type AgentKind, type CatalogModel, type ProviderView } from '@cindy/model-providers';
 
 import { claudeModelFamily, scopedWindowBelongsToFamily } from '@cindy/maker-shared/subscription-usage';
+import { canReadMagpieUsage, magpieQuotaWindowsForModel } from '../../shared/magpieUsage.js';
 import { modelImageInputDefault } from '../../shared/modelImageInputOverride.js';
 import { getModelPriceQuote } from '../../shared/modelPriceQuote.js';
+import type { ProviderAccountUsageRequest, ProviderAccountUsageResult } from '../../shared/providerAccountUsage.js';
 import { USD_TO_CNY_FIXED_RATE, type ModelPricingCatalog } from '../../shared/regionalMoney.js';
 import {
   modelGroupCandidateKey,
@@ -53,6 +56,7 @@ export interface ModelGroupResolverDeps {
    * 本机连接的额度不会拿去给别的电脑上同 ID 的连接用。
    */
   quotaWindows(): Promise<ReadonlyMap<string, readonly (ModelGroupTraceQuota & { scopedTo?: string | null })[]>>;
+  readLocalMagpieUsage?(request: ProviderAccountUsageRequest): Promise<ProviderAccountUsageResult>;
   /**
    * 其他电脑与分享来的位置里此刻能选的那些(插件卡片的远程模型用的同一份名单)。只在路线里有不在本机的来源时读；
    * 没提供时这些来源一律不可用。
@@ -91,7 +95,7 @@ function within<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     promise,
-    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('model group remote read timed out')), ms); }),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('model group read timed out')), ms); }),
   ]).finally(() => clearTimeout(timer));
 }
 
@@ -137,6 +141,20 @@ function scopedWindowApplies(scopedTo: string, modelId: string, modelName: strin
   const family = claudeModelFamily(modelId) ?? claudeModelFamily(modelName);
   if (family) return scopedWindowBelongsToFamily({ modelId: null, modelDisplayName: scopedTo } as Parameters<typeof scopedWindowBelongsToFamily>[0], family);
   return modelName.toLowerCase().includes(scopedTo.toLowerCase());
+}
+
+function magpieTraceWindows(result: ProviderAccountUsageResult | null, model: string, now: number): ModelGroupTraceQuota[] {
+  if (result?.status !== 'ready' || result.stale || result.snapshot.kind !== 'magpie-quota') return [];
+  return magpieQuotaWindowsForModel(result.snapshot, model, now).flatMap(window => {
+    // Magpie names the window separately from its pool, e.g. "Gemini · 7 days".
+    const label = window.name.split('·').at(-1)?.trim() ?? '';
+    const duration = /^(\d+)\s*(h|hours?|d|days?)$/i.exec(label);
+    const hours = duration ? Number(duration[1]) * (duration[2].toLowerCase().startsWith('d') ? 24 : 1)
+      : /^weekly$/i.test(label) ? 7 * 24 : 0;
+    return hours > 0 && Number.isSafeInteger(hours * 3_600_000)
+      ? [{ usedPercent: 100 - window.remaining, resetAtMs: window.resetsAt, windowMs: hours * 3_600_000 }]
+      : [];
+  });
 }
 
 /** 「按权重」计数对应的那份权重：来源或权重变了，旧计数按新比例算不对，从头开始。 */
@@ -226,33 +244,31 @@ export function createModelGroupResolver(deps: ModelGroupResolverDeps) {
     };
   }
 
-  async function inspect(route: ModelGroupRoute, views: ProviderView[]): Promise<ModelGroupCandidateFacts[]> {
+  async function inspect(route: ModelGroupRoute, views: ProviderView[], scope: string): Promise<ModelGroupCandidateFacts[]> {
     const agents = deps.agents();
     // 远程读取与读额度同时进行，整体仍在额度等待的时限内。
     const remote = remoteReads(route);
-    const quota = await deps.quotaWindows().catch(() => new Map<string, never[]>());
-    const pricing = route.strategy === 'cheapest' && deps.pricing ? await deps.pricing().catch(() => null) : null;
+    const quotaRead = deps.quotaWindows().catch(() => new Map<string, never[]>());
+    const pricingRead = route.strategy === 'cheapest' && deps.pricing ? deps.pricing().catch(() => null) : null;
     const installed = new Map<string, boolean>();
     for (const candidate of route.candidates) {
       const agent = agentOf(candidate.agentKind);
       if (!candidate.agentDeviceId && !installed.has(agent)) installed.set(agent, await deps.harnessInstalled(agent));
     }
-    const locations = remote ? await remote.locations : null;
+    const magpieReads = new Map<string, Promise<ProviderAccountUsageResult | null>>();
+    const { readLocalMagpieUsage } = deps;
     return Promise.all(route.candidates.map(async (candidate) => {
       const agent = agentOf(candidate.agentKind);
-      const { agentDeviceId } = candidate;
+      const { agentDeviceId, providerId } = candidate;
       const remoteViews = agentDeviceId ? (await remote?.views.get(agentDeviceId)) ?? null : null;
       const catalog: Catalog = agentDeviceId
         ? { views: remoteViews ?? [], agents: GHOST_REMOTE_AGENT_MODELS }
         : { views, agents };
-      const view = catalog.views.find((item) => item.id === candidate.providerId);
+      const view = catalog.views.find((item) => item.id === providerId);
       const model = view?.models[agent]?.find((item) => item.id === candidate.model);
       const modelName = model?.name ?? candidate.model;
-      const windows = quota.get(modelGroupQuotaKey(agentDeviceId, candidate.providerId))
-        // 只对某个模型生效的窗口，只在候选就是那个模型时参与。
-        ?.filter((window) => !window.scopedTo || scopedWindowApplies(window.scopedTo, candidate.model, modelName))
-        .map(({ usedPercent, resetAtMs, windowMs }) => ({ usedPercent, resetAtMs, windowMs }));
-      const exact = { agentKind: candidate.agentKind, providerId: candidate.providerId, model: candidate.model, effort: '', fastMode: false as const };
+      const exact = { agentKind: candidate.agentKind, providerId, model: candidate.model, effort: '', fastMode: false as const };
+      const locations = agentDeviceId ? await remote?.locations : null;
       const available = agentDeviceId
         // 与插件卡片里的远程模型同一判断：位置此刻能选，模型也在那里允许远程调用的目录里。
         ? !!locations && !!remoteViews && await isGhostCardModelRouteAvailable({ ...exact, agentDeviceId }, {
@@ -262,6 +278,23 @@ export function createModelGroupResolver(deps: ModelGroupResolverDeps) {
             remoteViews: async () => remoteViews,
           }) && (await remote?.harness.get(remoteHarnessKey(agentDeviceId, agent))) !== false
         : installed.get(agent) === true && isPluginModelPickerRouteAvailable(exact, views, agents);
+      let magpieRead: Promise<ProviderAccountUsageResult | null> | undefined;
+      if (readLocalMagpieUsage && scope === deps.scope() && !agentDeviceId && !candidate.off && available && canReadMagpieUsage(view)
+        && (model?.catalogPresetId === 'magpie' || model?.discoveredSource?.kind === 'magpie')) {
+        const key = JSON.stringify([providerId, agent]);
+        magpieRead = magpieReads.get(key);
+        if (!magpieRead) {
+          magpieRead = within(readLocalMagpieUsage({ providerId, agent }), deps.remoteWaitMs ?? MODEL_GROUP_REMOTE_WAIT_MS).catch(() => null);
+          magpieReads.set(key, magpieRead);
+        }
+      }
+      const [quota, magpie, pricing] = await Promise.all([quotaRead, magpieRead, pricingRead]);
+      const subscriptionWindows = quota.get(modelGroupQuotaKey(agentDeviceId, providerId))
+        // 只对某个模型生效的窗口，只在候选就是那个模型时参与。
+        ?.filter((window) => !window.scopedTo || scopedWindowApplies(window.scopedTo, candidate.model, modelName))
+        .map(({ usedPercent, resetAtMs, windowMs }) => ({ usedPercent, resetAtMs, windowMs }));
+      const magpieWindows = magpieTraceWindows(magpie ?? null, candidate.model, deps.now());
+      const windows = subscriptionWindows?.length ? subscriptionWindows : magpieWindows;
       return {
         available,
         ...(available && route.effort && isPluginModelPickerRouteAvailable(
@@ -269,7 +302,8 @@ export function createModelGroupResolver(deps: ModelGroupResolverDeps) {
         ) ? { effort: route.effort } : {}),
         modelName,
         sourceName: view?.name ?? candidate.providerId,
-        windows: windows && windows.length > 0 ? windows : null,
+        windows: windows.length ? windows : null,
+        ...(!subscriptionWindows?.length && magpieWindows.length ? { meteredQuota: true } : {}),
         ...(route.strategy === 'cheapest'
           ? { price: agentDeviceId ? remoteListedPrice(view, model) : listedPrice(view, agent, model, pricing) }
           : {}),
@@ -300,7 +334,7 @@ export function createModelGroupResolver(deps: ModelGroupResolverDeps) {
     // 为另一台电脑跑 Agent 时只认允许被远程调用的连接：别的连接在这次选路里按没有连接处理。
     const remoteInvocable = (view: ProviderView) => (deps.remoteInvocable ? deps.remoteInvocable(view.id) : view.remoteInvocationEnabled === true);
     const views = request.remoteInvocableOnly ? allViews.filter(remoteInvocable) : allViews;
-    const facts = await inspect(route, views);
+    const facts = await inspect(route, views, scope);
     const picked = pickModelGroupCandidate(route, facts, {
       now, lastPickedKey: lastPicked.get(`${scope}\u0000${route.id}`) ?? null, needsImage,
       weightCounters: countersFor(`${scope}\u0000${route.id}`, weightSignature(target.route)),
@@ -331,7 +365,8 @@ export function createModelGroupResolver(deps: ModelGroupResolverDeps) {
 
   /** 一条路线每个候选此刻的事实(与新任务解析同一判断)；不推进「轮流」的位置与「按权重」的计数。 */
   async function candidateFacts(route: ModelGroupRoute): Promise<ModelGroupCandidateFacts[]> {
-    return inspect(route, await deps.views());
+    const scope = deps.scope();
+    return inspect(route, await deps.views(), scope);
   }
 
   return { resolve, commit, candidateFacts };
