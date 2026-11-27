@@ -41,7 +41,7 @@ import {
 } from '../../shared/menubarQuota.js';
 
 export type MenubarHarness = 'claude-code' | 'codex' | 'pi' | 'acp';
-export type MenubarFamily = 'claude' | 'codex' | 'grok' | 'kimi' | 'opencode-go' | 'zhipu' | 'plugin' | 'shared';
+export type MenubarFamily = 'claude' | 'codex' | 'grok' | 'kimi' | 'opencode-go' | 'zhipu' | 'magpie' | 'plugin' | 'shared';
 
 export interface MenubarWindowInput {
   kind: 'session' | 'week' | 'scoped' | 'period' | 'custom';
@@ -236,7 +236,9 @@ const MIN_PACE_ELAPSED = 0.03;
 const ROOMY_CELL_LIMIT = 4;
 /** Settings' soft daily limit for a period quota: period total / 30 × 4.5 (a display hint, not a cap). */
 const DAILY_SOFT_LIMIT_FACTOR = 4.5;
-const FAMILY_ORDER: Record<MenubarFamily, number> = { claude: 0, codex: 1, grok: 2, kimi: 3, 'opencode-go': 4, zhipu: 5, plugin: 6, shared: 7 };
+/** Concentric detail rings stay clear of the centered percentage in both Swift and Windows panels. */
+const MAX_DETAIL_RINGS = 3;
+const FAMILY_ORDER: Record<MenubarFamily, number> = { claude: 0, codex: 1, grok: 2, kimi: 3, 'opencode-go': 4, zhipu: 5, magpie: 6, plugin: 7, shared: 8 };
 const FAMILY_COLORS: Record<MenubarFamily, MenubarColor[]> = {
   claude: ['claude', 'claude2', 'claude3'],
   codex: ['codex'],
@@ -244,6 +246,7 @@ const FAMILY_COLORS: Record<MenubarFamily, MenubarColor[]> = {
   kimi: ['fill'],
   'opencode-go': ['fill'],
   zhipu: ['fill'],
+  magpie: ['ink', 'ink2', 'ink3'],
   plugin: ['fill'],
   shared: ['fill'],
 };
@@ -1038,16 +1041,20 @@ class Builder {
     const remaining = limit.remaining;
     const level = levelOf(remaining);
     const colors = FAMILY_COLORS[source.family];
-    const multi = state.windows.length > 1;
+    const ringWindows = state.windows.length <= MAX_DETAIL_RINGS
+      ? state.windows
+      : [...state.windows].sort((a, b) => a.remaining - b.remaining).slice(0, MAX_DETAIL_RINGS);
+    const multi = ringWindows.length > 1;
     const ringColor = levelColor(level) ?? colors[0]!;
     const rings = multi
-      ? state.windows.map((window, index) => ({
+      ? ringWindows.map((window, index) => ({
           fraction: clamp(window.remaining / 100, 0, 1),
           color: colors[index % colors.length]!,
         }))
       : [{ fraction: clamp(remaining / 100, 0, 1), color: ringColor }];
     const limits = state.windows.filter((window) => window.window.kind !== 'scoped');
-    const refreshList = limits
+    const refreshSource = source.family === 'magpie' ? ringWindows : limits;
+    const refreshList = refreshSource
       .filter((window) => window.window.resetsAtMs !== null)
       .map((window) => this.t('say.windowRefresh', { window: this.windowLabel(window.window), at: this.at(window.window.resetsAtMs!) }))
       .join(this.t('headline.joiner'));
@@ -1084,13 +1091,25 @@ class Builder {
       saySecondary = refreshList ? this.t('headline.sentence', { text: refreshList }) : null;
     }
     const facts: MenubarFact[] = [];
-    for (const window of limits) {
-      if (window.window.resetsAtMs === null) continue;
-      facts.push({
-        label: window.remaining <= 0 ? this.t('fact.resetsFull') : this.t('fact.windowResets', { window: this.windowLabel(window.window) }),
-        value: this.at(window.window.resetsAtMs),
-        sub: this.t('fact.timeLeft', { duration: this.duration(window.leftMs) }),
-      });
+    if (source.family === 'magpie') {
+      for (const window of limits) {
+        facts.push({
+          label: this.windowLabel(window.window),
+          value: this.t('fact.remainingPercent', { n: Math.round(window.remaining) }),
+          sub: window.window.resetsAtMs !== null
+            ? this.t('cell.resetsIn', { duration: this.duration(window.leftMs) })
+            : '',
+        });
+      }
+    } else {
+      for (const window of limits) {
+        if (window.window.resetsAtMs === null) continue;
+        facts.push({
+          label: window.remaining <= 0 ? this.t('fact.resetsFull') : this.t('fact.windowResets', { window: this.windowLabel(window.window) }),
+          value: this.at(window.window.resetsAtMs),
+          sub: this.t('fact.timeLeft', { duration: this.duration(window.leftMs) }),
+        });
+      }
     }
     for (const window of state.windows.filter((entry) => entry.window.kind === 'scoped')) {
       facts.push({
@@ -1151,9 +1170,11 @@ class Builder {
       bigUnit: '%',
       bigColor: null,
       bigCompact: multi,
-      bigCaption: this.t('detail.windowLeft', { window: this.windowLabel(limit.window) }),
+      bigCaption: source.family === 'magpie'
+        ? this.windowLabel(limit.window)
+        : this.t('detail.windowLeft', { window: this.windowLabel(limit.window) }),
       legend: multi
-        ? state.windows.map((window, index) => ({
+        ? ringWindows.map((window, index) => ({
             label: `${this.windowLabel(window.window)} ${Math.round(window.remaining)}%`,
             color: colors[index % colors.length]!,
           }))

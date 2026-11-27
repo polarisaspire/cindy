@@ -156,6 +156,7 @@ select { max-width: 100%; background: var(--tile); padding: 5px; border: 1px sol
 .rings circle { fill: none; stroke-width: 8px; stroke-linecap: round; }
 .ring-track { stroke: var(--ink5); }
 .rings > div { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; padding: 30px; }
+.rings > div > small { line-height: 1.25; text-wrap: balance; }
 .rings b { font-size: 34px; }
 .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; text-align: left; margin: 16px 0; }
 .facts > div { padding: 10px; }

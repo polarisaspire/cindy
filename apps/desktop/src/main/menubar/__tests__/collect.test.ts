@@ -8,6 +8,7 @@ beforeEach(() => { disabled.providers = {}; });
 
 import {
   kimiSource,
+  magpieSource,
   claudeSource,
   codexSource,
   collectMenubarInputs,
@@ -1045,5 +1046,105 @@ describe('plugin engine quota collection', () => {
     } as RemoteSubscriptionDeps);
     expect(unsupported.incomplete).toBe(false);
     expect(retainRemoteSubscriptions(previousSeen, unsupported, NOW + 120_000).sources).toEqual([]);
+  });
+});
+
+// Unit: Magpie gateway connections with discovered Magpie models become one menu bar tube
+// without probing plain API connections, summing accounts, or showing expired/stale data.
+describe('magpie quota collection', () => {
+  const magpieProvider = provider({
+    id: 'v-magpie', name: 'V-magpie', source: 'user', auth: { method: 'apiKey' }, access: { kind: 'api' },
+    routing: { pi: { upstream: 'https://gateway.example.test/v1', authStrategy: 'api-key-header' } },
+    models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null, discoveredSource: { kind: 'magpie', providerId: 'agy-cli' } }] },
+  } as Partial<ProviderView> & { id: string });
+  const plainApi = provider({
+    id: 'plain-api', name: 'Plain API', source: 'user', auth: { method: 'apiKey' }, access: { kind: 'api' },
+    routing: { pi: { upstream: 'https://api.example.test/v1', authStrategy: 'api-key-header' } },
+  } as Partial<ProviderView> & { id: string });
+
+  it('maps single and multi-account Magpie windows while dropping errors, expired and stale readings', () => {
+    const reset = NOW + 4 * 86_400_000;
+    const single = magpieSource(magpieProvider, {
+      status: 'ready', integration: 'magpie', stale: false,
+      snapshot: {
+        kind: 'magpie-quota', fetchedAt: NOW,
+        accounts: [{
+          readAt: NOW - 60_000, error: false,
+          windows: [
+            { name: 'Gemini · 7 days', pool: 'gemini', remaining: 26, resetsAt: reset },
+            { name: 'Expired', pool: 'gemini', remaining: 10, resetsAt: NOW - 1 },
+            { name: 'Claude & GPT · 7 days', pool: 'claude-gpt', remaining: 100, resetsAt: null },
+          ],
+        }],
+      },
+    }, NOW);
+    expect(single).toMatchObject({
+      kind: 'subscription', id: 'v-magpie', providerId: 'v-magpie', family: 'magpie',
+      brand: 'V-magpie', account: null, plan: null, updatedAtMs: NOW - 60_000,
+      windows: [
+        { kind: 'custom', label: 'Gemini · 7 days', usedPercent: 74, resetsAtMs: reset, windowMinutes: 0 },
+        { kind: 'custom', label: 'Claude & GPT · 7 days', usedPercent: 0, resetsAtMs: null, windowMinutes: 0 },
+      ],
+    });
+
+    const multi = magpieSource(magpieProvider, {
+      status: 'ready', integration: 'magpie', stale: false,
+      snapshot: {
+        kind: 'magpie-quota', fetchedAt: NOW,
+        accounts: [
+          { readAt: NOW - 120_000, error: false, windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 40, resetsAt: reset }] },
+          { readAt: NOW - 30_000, error: true, windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 5, resetsAt: reset }] },
+          { readAt: NOW - 30_000, error: false, windows: [{ name: 'Claude & GPT · 7 days', pool: 'claude-gpt', remaining: 85, resetsAt: null }] },
+        ],
+      },
+    }, NOW);
+    expect(multi.windows.map(w => [w.label, w.usedPercent])).toEqual([
+      ['#1 · Gemini · 7 days', 60],
+      ['#3 · Claude & GPT · 7 days', 15],
+    ]);
+    expect(multi.updatedAtMs).toBe(NOW - 120_000);
+
+    expect(magpieSource(magpieProvider, { status: 'ready', integration: 'magpie', stale: true, snapshot: { kind: 'magpie-quota', fetchedAt: NOW, accounts: [{ readAt: NOW, error: false, windows: [{ name: 'Gemini · 7 days', remaining: 50, resetsAt: reset }] }] } }, NOW).windows).toEqual([]);
+    expect(magpieSource(magpieProvider, { status: 'unavailable', integration: 'magpie', error: 'auth' }, NOW).windows).toEqual([]);
+  });
+
+  it('collects only discovered Magpie connections and falls back to payg when unsupported', async () => {
+    const readMagpie = vi.fn<NonNullable<MenubarCollectDeps['readMagpie']>>(async () => ({
+      status: 'ready', integration: 'magpie', stale: false,
+      snapshot: {
+        kind: 'magpie-quota', fetchedAt: NOW,
+        accounts: [{ readAt: NOW - 10_000, error: false, windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 68, resetsAt: NOW + 7200_000 }] }],
+      },
+    }));
+    const collected = await collectMenubarInputs({
+      nowMs: NOW,
+      listProviders: async () => [magpieProvider, plainApi],
+      readMagpie,
+      readCodex: async () => null,
+      readClaude: async () => null,
+      readXai: async () => null,
+      readBalance: async () => null,
+      readUsage: async () => null,
+      activities: () => [],
+      sessionRow: async () => null,
+      selfDeviceName: 'Win',
+    });
+    expect(readMagpie.mock.calls).toEqual([['v-magpie']]);
+    expect(collected.sources.map(s => [s.id, s.kind])).toEqual([['v-magpie', 'subscription'], ['plain-api', 'payg']]);
+
+    const fallback = await collectMenubarInputs({
+      nowMs: NOW,
+      listProviders: async () => [magpieProvider],
+      readMagpie: async () => ({ status: 'unsupported' }),
+      readCodex: async () => null,
+      readClaude: async () => null,
+      readXai: async () => null,
+      readBalance: async () => null,
+      readUsage: async () => null,
+      activities: () => [],
+      sessionRow: async () => null,
+      selfDeviceName: 'Win',
+    });
+    expect(fallback.sources.map(s => [s.id, s.kind])).toEqual([['v-magpie', 'payg']]);
   });
 });

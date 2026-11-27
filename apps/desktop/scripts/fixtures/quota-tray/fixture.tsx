@@ -2,7 +2,7 @@ import { mountPage } from '../../ui-page/harness';
 import i18n from '../../../src/renderer/i18n';
 import { QuotaTray } from '../../../src/renderer/quota-tray-panel';
 import { buildMenubarView, type MenubarSourceInput } from '../../../src/main/menubar/snapshot';
-import { familyLogo, MENUBAR_CINDY_LOGO, MENUBAR_HARNESS_LOGOS } from '../../../src/main/menubar/logos';
+import { familyLogo, MENUBAR_CINDY_LOGO, MENUBAR_HARNESS_LOGOS, monogramLogo } from '../../../src/main/menubar/logos';
 import { DEFAULT_MENUBAR_SETTINGS, type MenubarView } from '../../../src/shared/menubarQuota';
 import { QUOTA_PANEL_DESIGN } from '../../../src/shared/quotaPanelDesign';
 
@@ -31,20 +31,41 @@ mountPage({
     const used = ctx.case === 'crowded' ? [87, 35, 63, 100, 0, 13, 48, 28] : [95, 39, 60];
     const names = ctx.case === 'crowded' ? ['alex', 'mxm', 'mira', 'leo', 'nova', 'vick', 'dash', 'guy'] : ['Home-PC', 'guyong', 'Work'];
     const build = () => {
-      const sources: MenubarSourceInput[] = names.map((name, i) => {
-        const family = ctx.case === 'crowded' && i % 2 ? 'claude' : 'codex';
-        return {
-          kind: 'subscription', id: name, providerId: name, family, logoSvg: familyLogo(family),
-          brand: family === 'claude' ? 'Claude' : 'Codex', account: name, plan: 'Pro',
-          windows: [{ kind: 'week', usedPercent: used[i], resetsAtMs: now + 14400000 * (i + 1), windowMinutes: 10080 }],
-          credits: used[i] === 100 ? 1250 : null, creditsUnlimited: false, prepaidUsd: null, updatedAtMs: now,
-        };
-      });
+      const sources: MenubarSourceInput[] = ctx.case === 'magpie'
+        ? [
+            { kind: 'balance', id: 'cindy', logoSvg: MENUBAR_CINDY_LOGO, available: 0,
+              fullAmount: 100, burnPerDay: null, observedAtMs: now, currency: 'USD', quota: null },
+            { kind: 'subscription', id: 'codex-lvchat', providerId: 'codex-lvchat', family: 'codex',
+              logoSvg: familyLogo('codex'), brand: 'Codex', account: 'lvchat', plan: 'Pro',
+              windows: [{ kind: 'week', usedPercent: 57, resetsAtMs: now + 9 * 3600000 + 52 * 60000, windowMinutes: 10080 }],
+              credits: null, creditsUnlimited: false, prepaidUsd: null, updatedAtMs: now - 60000 },
+            { kind: 'subscription', id: 'xai-polaris', providerId: 'xai-polaris', family: 'grok',
+              logoSvg: familyLogo('grok'), brand: 'Grok', account: 'polarisaspire', plan: 'SuperGrok',
+              windows: [{ kind: 'week', usedPercent: 21, resetsAtMs: now + 45 * 60000, windowMinutes: 10080 }],
+              credits: null, creditsUnlimited: false, prepaidUsd: null, updatedAtMs: now - 60000 },
+            { kind: 'subscription', id: 'v-magpie', providerId: 'v-magpie', family: 'magpie',
+              logoSvg: monogramLogo('V-magpie'), brand: 'V-magpie', account: null, plan: null,
+              windows: [
+                { kind: 'custom', label: 'Gemini · 7 days', usedPercent: 74, resetsAtMs: now + 4 * 86400000, windowMinutes: 0 },
+                { kind: 'custom', label: 'Gemini · 5 hours', usedPercent: 7, resetsAtMs: now + 2 * 3600000, windowMinutes: 0 },
+                { kind: 'custom', label: 'Claude & GPT · 7 days', usedPercent: 0, resetsAtMs: null, windowMinutes: 0 },
+              ],
+              credits: null, creditsUnlimited: false, prepaidUsd: null, updatedAtMs: now - 60000 },
+          ]
+        : names.map((name, i) => {
+            const family = ctx.case === 'crowded' && i % 2 ? 'claude' : 'codex';
+            return {
+              kind: 'subscription', id: name, providerId: name, family, logoSvg: familyLogo(family),
+              brand: family === 'claude' ? 'Claude' : 'Codex', account: name, plan: 'Pro',
+              windows: [{ kind: 'week', usedPercent: used[i], resetsAtMs: now + 14400000 * (i + 1), windowMinutes: 10080 }],
+              credits: used[i] === 100 ? 1250 : null, creditsUnlimited: false, prepaidUsd: null, updatedAtMs: now,
+            };
+          });
       if (ctx.case === 'crowded') sources.unshift({ kind: 'balance', id: 'cindy', logoSvg: MENUBAR_CINDY_LOGO, available: 90.2,
         fullAmount: 100, burnPerDay: 3, observedAtMs: now, currency: 'CNY', quota: null });
       const view = buildMenubarView({
-        nowMs: now, locale: ctx.locale, moneySymbol: '¥', settings, sources, tasks: [],
-        usage: { days, scopes: { all: scope, local: scope } }, updatedAtMs: now,
+        nowMs: now, locale: ctx.locale, moneySymbol: ctx.case === 'magpie' ? '$' : '¥', settings, sources, tasks: [],
+        usage: { days, scopes: { all: scope, local: scope } }, updatedAtMs: now - 60000,
         harnessLogos: MENUBAR_HARNESS_LOGOS, uiStrings: strings,
         t: (key, values) => i18n.t('menubar.' + key, values) as string,
       });

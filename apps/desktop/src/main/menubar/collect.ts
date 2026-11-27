@@ -3,6 +3,7 @@ import { isZhipuCodingPlanRoute, type ProviderAccountUsageResult } from '../../s
 import { formatClaudeSubscriptionPlanLabel, formatCodexPlanLabel } from '@cindy/maker-shared/subscription-usage';
 import { codexAccountDisplayKey } from '../maker-host/codex-auth-identity.js';
 import { kimiUsageWindowMinutes } from '../../shared/kimiCodingUsage.js';
+import { canReadMagpieUsage, hasMagpieModels } from '../../shared/magpieUsage.js';
 import { opencodeGoUsageWindowMinutes } from '../../shared/opencodeGoUsage.js';
 /**
  * Turns Cindy's existing usage readers into the menu bar builder's inputs.
@@ -88,6 +89,7 @@ export interface MenubarCollectDeps {
   readKimi?(providerId: string): Promise<ProviderAccountUsageResult>;
   readOpenCodeGo?(providerId: string): Promise<ProviderAccountUsageResult>;
   readZhipu?(providerId: string): Promise<ProviderAccountUsageResult>;
+  readMagpie?(providerId: string): Promise<ProviderAccountUsageResult>;
   readCodex(providerId: string): Promise<CodexAccountUsagePayload | RateLimitSnapshot | null>;
   readClaude(providerId: string): Promise<ClaudeSubscriptionUsageSnapshot | null>;
   readXai(providerId: string): Promise<XaiSubscriptionUsageSnapshot | null>;
@@ -192,6 +194,11 @@ export async function collectMenubarInputs(deps: MenubarCollectDeps): Promise<Me
       const result = await safe(`zhipu:${provider.id}`, () => deps.readZhipu!(provider.id), null);
       return zhipuSource(provider, result);
     }
+    if (deps.readMagpie && canReadMagpieUsage(provider) && hasMagpieModels(provider)) {
+      const result = await safe(`magpie:${provider.id}`, () => deps.readMagpie!(provider.id), null);
+      if (result?.status === 'unsupported') return paygSource(provider);
+      return magpieSource(provider, result, deps.nowMs);
+    }
     return paygSource(provider);
   });
   const pluginEngineReads = deps.readPluginEngineUsage
@@ -224,8 +231,8 @@ export async function collectMenubarInputs(deps: MenubarCollectDeps): Promise<Me
   const consuming = consumingSourceIds(tasks, providers, pluginEngines);
   const collectedAt = deps.now?.() ?? deps.nowMs;
   for (const source of sources) {
-    // A GLM window may have reset while another provider or task was still loading.
-    if (source.kind === 'subscription' && source.family === 'zhipu') {
+    // A GLM or Magpie window may have reset while another provider or task was still loading.
+    if (source.kind === 'subscription' && (source.family === 'zhipu' || source.family === 'magpie')) {
       source.windows = source.windows.filter(window => window.resetsAtMs === null || window.resetsAtMs > collectedAt);
       if (!source.windows.length) source.updatedAtMs = null;
     }
@@ -928,6 +935,60 @@ function zhipuSource(provider: ProviderView, result: ProviderAccountUsageResult 
     account: null, plan: snapshot?.level?.toUpperCase() || null,
     windows, credits: null, creditsUnlimited: false, prepaidUsd: null,
     updatedAtMs: windows.length > 0 ? snapshot?.fetchedAt ?? null : null,
+  };
+}
+
+/**
+ * Maps one Magpie gateway connection into a single tube + detail page (Option A):
+ * each upstream account's live windows remain independent without summing across accounts or pools.
+ */
+export function magpieSource(
+  provider: ProviderView,
+  result: ProviderAccountUsageResult | null,
+  nowMs: number,
+): MenubarSubscriptionInput {
+  const snapshot = result?.status === 'ready' && !result.stale && result.snapshot.kind === 'magpie-quota'
+    ? result.snapshot
+    : null;
+  const accounts = snapshot?.accounts ?? [];
+  const multiAccount = accounts.length > 1;
+  const windows: MenubarWindowInput[] = [];
+  const readTimes: number[] = [];
+  for (let index = 0; index < accounts.length; index += 1) {
+    const account = accounts[index]!;
+    if (account.error || (account as { disabled?: boolean }).disabled) continue;
+    let added = false;
+    for (const window of account.windows) {
+      if (window.resetsAt !== null && window.resetsAt <= nowMs) continue;
+      windows.push({
+        kind: 'custom',
+        label: multiAccount ? `#${index + 1} · ${window.name}` : window.name,
+        usedPercent: clampPercent(100 - window.remaining),
+        resetsAtMs: window.resetsAt,
+        windowMinutes: 0,
+      });
+      added = true;
+    }
+    if (added && account.readAt !== null) readTimes.push(account.readAt);
+  }
+  const updatedAtMs = windows.length > 0
+    ? (readTimes.length > 0 ? Math.min(...readTimes) : snapshot?.fetchedAt ?? null)
+    : null;
+  const brand = provider.name || 'Magpie';
+  return {
+    kind: 'subscription',
+    id: provider.id,
+    providerId: provider.id,
+    family: 'magpie',
+    logoSvg: providerLogo(provider.id, brand, provider.routing),
+    brand,
+    account: null,
+    plan: null,
+    windows,
+    credits: null,
+    creditsUnlimited: false,
+    prepaidUsd: null,
+    updatedAtMs,
   };
 }
 

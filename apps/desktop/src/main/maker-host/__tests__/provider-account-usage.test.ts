@@ -6,6 +6,7 @@ import {
   invalidateKimiAccountUsage,
   setAccountUsageOAuthReader,
   readKimiCodingAccountUsage,
+  readMagpieProviderAccountUsage,
   readOpenCodeGoAccountUsage,
   readZhipuCodingPlanAccountUsage,
   isZhipuCodingPlanProvider,
@@ -506,6 +507,43 @@ describe('readProviderAccountUsage', () => {
       status: 'ready', stale: false, snapshot: { weekly: { usedPercent: 0 } },
     });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  // Unit: quota panel Magpie reads must only touch routes with discovered Magpie models,
+  // never probe arbitrary API key connections, and share the cache/in-flight slot with settings.
+  it('reads only discovered Magpie routes and shares cache with settings', async () => {
+    setAccountUsageProviderReader(id => id === 'plain'
+      ? mkProvider({ id, routing: { pi: { upstream: 'https://plain.test/v1', authStrategy: 'api-key-header' } } })
+      : mkProvider({
+          id,
+          routing: {
+            'claude-code': { upstream: 'https://other.test/v1', authStrategy: 'api-key-header' },
+            pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' },
+          },
+          models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null, discoveredSource: { kind: 'magpie', providerId: 'agy-cli' } }] },
+        }));
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonRes({
+      object: 'list',
+      data: [{ readAt: '2026-11-26T03:00:00Z', windows: [{ name: 'Gemini · 7 days', remaining: 64 }] }],
+    }));
+    setAccountUsageFetch(fetch);
+
+    await expect(readMagpieProviderAccountUsage({ providerId: 'plain' })).resolves.toEqual({ status: 'unsupported' });
+    expect(fetch).not.toHaveBeenCalled();
+
+    setAccountUsageKeyReader(() => null);
+    await expect(readMagpieProviderAccountUsage({ providerId: 'mixed' })).resolves.toEqual({
+      status: 'unavailable', integration: 'magpie', error: 'no-credentials',
+    });
+    expect(fetch).not.toHaveBeenCalled();
+
+    setAccountUsageKeyReader((_id, agent) => agent === 'pi' ? 'fake-magpie-key' : 'fake-other-key');
+    const panel = await readMagpieProviderAccountUsage({ providerId: 'mixed' });
+    expect(panel).toMatchObject({ status: 'ready', integration: 'magpie', agent: 'pi' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith('https://gateway.test/v1/magpie/quotas', expect.anything());
+    await expect(readProviderAccountUsage({ providerId: 'mixed', agent: 'pi' })).resolves.toEqual(panel);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('returns unsupported when no official route exists', async () => {

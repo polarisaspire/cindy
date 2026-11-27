@@ -19,7 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { parseMagpieQuota } from '../../shared/magpieUsage.js';
+import { canReadMagpieUsage, hasMagpieModels, magpieQuotaEndpoint, parseMagpieQuota } from '../../shared/magpieUsage.js';
 import { readMagpieAccountUsage, resetMagpieAccountUsage } from './magpie-account-usage.js';
 
 import type { AgentKind, Provider } from '@cindy/model-providers';
@@ -508,12 +508,7 @@ export async function readProviderAccountUsage(
     if (providerAccountUsageSupported(request.providerId)) {
       return { status: 'unavailable', error: 'no-credentials' };
     }
-    return readMagpieAccountUsage(request, {
-      provider, owner: [ownerStamp, epoch], now: accountUsageNow, current: () => ownerCurrent() && epoch === kimiMutationEpoch,
-      key: agent => keyReader(request.providerId, agent),
-      read: (endpoint, key) => fetchAccountJson({ endpoint }, `Bearer ${key}`, parseMagpieQuota),
-      error: error => error instanceof AccountUsageRequestError ? { code: error.code, retryAt: error.retryAt } : { code: 'network' },
-    });
+    return callMagpieAccountUsage(request, provider, ownerStamp, epoch, ownerCurrent);
   }
   const revision = kimi ? String(generation?.revision) : '';
   // The official GLM endpoint returns account-wide quota even when several connections use the key.
@@ -747,4 +742,44 @@ export async function readZhipuCodingPlanAccountUsage(request: ProviderAccountUs
     }
   }
   return matchingRoute ? { status: 'unavailable', error: 'no-credentials' } : { status: 'unsupported' };
+}
+
+function callMagpieAccountUsage(
+  request: ProviderAccountUsageRequest,
+  provider: Provider | undefined,
+  ownerStamp: ReturnType<OwnerStampReader>,
+  epoch: number,
+  ownerCurrent: () => boolean,
+): Promise<ProviderAccountUsageResult> {
+  return readMagpieAccountUsage(request, {
+    provider,
+    owner: [ownerStamp, epoch],
+    now: accountUsageNow,
+    current: () => ownerCurrent() && epoch === kimiMutationEpoch,
+    key: agent => keyReader(request.providerId, agent),
+    read: (endpoint, key) => fetchAccountJson({ endpoint }, `Bearer ${key}`, parseMagpieQuota),
+    error: error => error instanceof AccountUsageRequestError ? { code: error.code, retryAt: error.retryAt } : { code: 'network' },
+  });
+}
+
+/** Select a local Magpie gateway route with discovered Magpie models, never probing arbitrary API keys. */
+export async function readMagpieProviderAccountUsage(request: ProviderAccountUsageRequest): Promise<ProviderAccountUsageResult> {
+  const provider = providerReader(request.providerId);
+  if (!canReadMagpieUsage(provider)) return { status: 'unsupported' };
+  const agents = request.agent ? [request.agent] : PROVIDER_ACCOUNT_USAGE_AGENTS;
+  let matched = false;
+  for (const agent of agents) {
+    if (!hasMagpieModels(provider, agent)) continue;
+    const route = provider?.routing[agent];
+    if (!route || route.disabled || !magpieQuotaEndpoint(route.upstream)) continue;
+    matched = true;
+    if (!keyReader(request.providerId, agent)?.trim()) continue;
+    const ownerStamp = ownerStampReader();
+    const epoch = kimiMutationEpoch;
+    const config = JSON.stringify(provider);
+    const ownerCurrent = () => JSON.stringify(ownerStampReader()) === JSON.stringify(ownerStamp)
+      && JSON.stringify(providerReader(request.providerId)) === config;
+    return callMagpieAccountUsage({ ...request, agent }, provider, ownerStamp, epoch, ownerCurrent);
+  }
+  return matched ? { status: 'unavailable', integration: 'magpie', error: 'no-credentials' } : { status: 'unsupported' };
 }
