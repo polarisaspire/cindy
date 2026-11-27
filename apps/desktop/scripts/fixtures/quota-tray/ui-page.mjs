@@ -7,10 +7,12 @@ export default {
   cases: {
     default: { about: 'Eight unread tasks, default clipping, settings, provider details and usage navigation' },
     crowded: { about: 'Nine sources at the widest panel: every value on one line inside its column, tubes level', viewport: { width: 368, height: 700 } },
+    magpie: { about: 'Magpie Option A single tube alongside official subscriptions and multi-pool detail page', viewport: { width: 350, height: 700 } },
   },
   async check(page, ui) {
     await page.locator('html[data-quota-painted=true]').waitFor();
     if (ui.case === 'crowded') return checkCrowdedRow(page, ui);
+    if (ui.case === 'magpie') return checkMagpie(page, ui);
     const natural = Number(await page.locator('html').getAttribute('data-quota-natural-height'));
     await page.setViewportSize({ width: 332, height: Math.ceil(natural) });
     const count = await page.locator('.task-row').count();
@@ -161,4 +163,19 @@ function crowdedRowIssues(settled) {
     }
   }
   return settled ? issues.length === 0 : issues;
+}
+
+async function checkMagpie(page, ui) {
+  const natural = Number(await page.locator('html').getAttribute('data-quota-natural-height'));
+  await page.setViewportSize({ width: 350, height: Math.ceil(natural) });
+  await page.locator('.source', { hasText: 'V-magpie' }).waitFor();
+  await ui.capture('overview');
+  await page.locator('.source', { hasText: 'V-magpie' }).click();
+  await page.locator('.rings').waitFor();
+  await page.locator('.page[data-leaving]').waitFor({ state: 'detached' }).catch(() => {});
+  const detailHeight = Number(await page.locator('html').getAttribute('data-quota-natural-height'));
+  await page.setViewportSize({ width: 350, height: Math.max(Math.ceil(detailHeight), 520) });
+  const factCount = await page.locator('.facts > .tile').count();
+  if (factCount !== 3) throw new Error(`Expected 3 Magpie window fact tiles, got ${factCount}`);
+  await ui.capture('detail');
 }

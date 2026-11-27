@@ -51,7 +51,7 @@ import { createLogger } from '../logger.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { readPluginHarnessUsage } from '../cindy-brain/pluginHarnesses.js';
 import { listPluginEngineViews, onPluginEnginesChanged } from '../maker-ipc/pluginEnginesIpc.js';
-import { readKimiCodingAccountUsage, readOpenCodeGoAccountUsage, readZhipuCodingPlanAccountUsage } from '../maker-host/provider-account-usage.js';
+import { readKimiCodingAccountUsage, readMagpieProviderAccountUsage, readOpenCodeGoAccountUsage, readZhipuCodingPlanAccountUsage } from '../maker-host/provider-account-usage.js';
 import { getSessionProvider, hasSessionProvider } from '../maker-host/session-provider-store.js';
 import {
   readClaudeSubscriptionUsageSnapshotForDeviceLink,
@@ -543,6 +543,7 @@ export class QuotaOverviewService {
       readKimi: (providerId) => readKimiCodingAccountUsage({ providerId, forceRefresh: force }),
       readOpenCodeGo: (providerId) => readOpenCodeGoAccountUsage({ providerId, forceRefresh: force }),
       readZhipu: (providerId) => readZhipuCodingPlanAccountUsage({ providerId, forceRefresh: force }),
+      readMagpie: (providerId) => readMagpieProviderAccountUsage({ providerId, forceRefresh: force }),
       readCodex: (providerId) => readCodexAccountUsageSnapshot(providerId),
       readClaude: (providerId) => readClaudeSubscriptionUsageSnapshotForDeviceLink(providerId),
       readXai: (providerId) => readXaiSubscriptionUsageSnapshotForDeviceLink(providerId),

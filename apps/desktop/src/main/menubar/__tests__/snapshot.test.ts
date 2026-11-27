@@ -600,3 +600,60 @@ describe('plugin engine menubar and widget projection', () => {
     expect(isLowOnEverything(input([depleted]))).toBe(true);
   });
 });
+
+// Unit: Magpie Option A renders one tube for the tightest live window, caps concentric detail
+// rings at 3 so multi-account pools never collide with the central metric, and lists every pool
+// window (including null-reset full pools) in detail facts plus iPhone widgets.
+describe('magpie panel and widget projection', () => {
+  it('builds one tube, caps rings at 3, and preserves every pool window in detail facts', () => {
+    const magpie: MenubarSubscriptionInput = {
+      kind: 'subscription',
+      id: 'v-magpie',
+      providerId: 'v-magpie',
+      family: 'magpie',
+      logoSvg: familyLogo('magpie'),
+      brand: 'V-magpie',
+      account: null,
+      plan: null,
+      windows: [
+        { kind: 'custom', label: '#1 · Gemini · 7 days', usedPercent: 74, resetsAtMs: NOW + 4 * DAY, windowMinutes: 0 },
+        { kind: 'custom', label: '#1 · Gemini · 5 hours', usedPercent: 7, resetsAtMs: NOW + 2 * HOUR, windowMinutes: 0 },
+        { kind: 'custom', label: '#1 · Claude & GPT · 7 days', usedPercent: 0, resetsAtMs: null, windowMinutes: 0 },
+        { kind: 'custom', label: '#2 · Gemini · 7 days', usedPercent: 45, resetsAtMs: NOW + 3 * DAY, windowMinutes: 0 },
+      ],
+      credits: null,
+      creditsUnlimited: false,
+      prepaidUsd: null,
+      updatedAtMs: NOW - 60_000,
+    };
+    const view = buildMenubarView(input([magpie]));
+    expect(view.sources[0]).toMatchObject({
+      id: 'v-magpie', kind: 'subscription', name: 'V-magpie',
+      value: '26', valueUnit: '%', level: 'warn', fill: 0.26, resetsAtMs: NOW + 4 * DAY,
+    });
+    const detail = view.details['v-magpie'];
+    expect(detail).toMatchObject({
+      title: 'V-magpie', bigValue: '26', bigUnit: '%',
+      action: { kind: 'new-task', providerId: 'v-magpie' },
+    });
+    expect(detail.rings).toHaveLength(3);
+    expect(detail.rings.map(r => r.color)).toEqual(['ink', 'ink2', 'ink3']);
+    expect(detail.legend.map(item => item.label)).toEqual([
+      '#1 · Gemini · 7 days 26%',
+      '#2 · Gemini · 7 days 55%',
+      '#1 · Gemini · 5 hours 93%',
+    ]);
+    expect(detail.facts).toHaveLength(4);
+    expect(detail.facts.map(f => [f.label, f.value])).toEqual([
+      ['#1 · Gemini · 7 days', '26% left'],
+      ['#1 · Gemini · 5 hours', '93% left'],
+      ['#1 · Claude & GPT · 7 days', '100% left'],
+      ['#2 · Gemini · 7 days', '55% left'],
+    ]);
+    expect(detail.facts[2]!.sub).toBe('');
+    const widget = buildUsageWidgetSnapshot(view, NOW, () => null);
+    expect(widget?.sources[0]).toMatchObject({
+      id: 'v-magpie', kind: 'subscription', name: 'V-magpie', logo: null, monogram: 'V', value: '26', unit: '%', fill: 0.26,
+    });
+  });
+});
