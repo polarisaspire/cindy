@@ -66,7 +66,8 @@ import type { InvokeResultPayload } from '@cindy/device-link';
 const SRC = 'controller-device';
 const kimiRead = vi.hoisted(() => vi.fn());
 const opencodeGoRead = vi.hoisted(() => vi.fn());
-vi.mock('../maker-host/provider-account-usage.js', () => ({
+vi.mock('../maker-host/provider-account-usage.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../maker-host/provider-account-usage.js')>()),
   readKimiCodingAccountUsage: kimiRead,
   readOpenCodeGoAccountUsage: opencodeGoRead,
 }));
