@@ -1396,7 +1396,7 @@ import {
   normalizeSessionProviderId,
   setSessionProvider,
 } from '../maker-host/session-provider-store.js';
-import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
+import { getActiveCatalog, hasPersistedMagpieModels, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
 import { createSubscriptionFastPolicy } from '../maker-host/subscription-fast-policy.js';
 import { DEFAULT_MODEL_COMPACTION_PCT, modelCompactionTarget } from '../../shared/modelContextLimit.js';
 import { resolveModelDefaultContextWindow } from '../maker-host/catalog-to-descriptors.js';
@@ -1413,9 +1413,11 @@ import { refreshAnthropicModelsFromProbe } from '../maker-host/model-discovery/a
 import { refreshOpenAiMediaModels } from '../maker-host/model-discovery/openai-media.js';
 import { refreshXaiMediaModels } from '../maker-host/model-discovery/xai-media.js';
 import { testProviderConnection } from '../maker-host/provider-diagnostics.js';
+import { magpieVerifiedStore } from '../maker-host/magpie-verified-store.js';
 import {
   readProviderAccountUsage,
   setAccountUsageKeyReader,
+  setAccountUsageMagpieStore,
   setAccountUsageOAuthReader,
   invalidateKimiAccountUsage,
   setAccountUsageFetch,
@@ -7673,6 +7675,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   setAccountUsageOwnerStampReader(() => {
     const session = getActiveAppSession();
     return { dataOwnerId: session.dataOwnerId, generation: session.generation };
+  });
+  setAccountUsageMagpieStore({
+    isKnown: (providerId, agent, endpoint) =>
+      hasPersistedMagpieModels(providerId, agent) || magpieVerifiedStore.has(providerId, agent, endpoint),
+    markVerified: (providerId, agent, endpoint, isCurrent) =>
+      magpieVerifiedStore.mark(providerId, agent, endpoint, isCurrent),
   });
 
   configureModelSettingsActions(registerProviderHandlers(cloudManagementProviderRegistry(createElectronIpcHandlerRegistry()), {

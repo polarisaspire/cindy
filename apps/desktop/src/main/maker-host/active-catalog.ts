@@ -2304,6 +2304,21 @@ export function setCustomProviderConfigs(configs: CustomProviderConfig[]): void 
   markChanged();
 }
 
+/**
+ * Whether a saved custom provider has persisted Magpie model-discovery metadata on the given
+ * runtime before `projectCurrentModelSources` strips display provenance across process restarts.
+ * Used only as a local eligibility gate for background quota polling (never for display names).
+ */
+export function hasPersistedMagpieModels(providerId: string, agent?: AgentKind): boolean {
+  const provider = custom.find((entry) => entry.id === providerId);
+  if (!provider) return false;
+  return Object.entries(provider.models).some(
+    ([runtime, models]) =>
+      (!agent || agent === runtime) &&
+      models?.some((model) => model.discoveredSource?.kind === 'magpie'),
+  );
+}
+
 export function hasCodexApiModelCapabilities(): boolean {
   return codexApiModels !== null;
 }

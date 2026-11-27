@@ -1,9 +1,15 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentKind, Provider } from '@cindy/model-providers';
 
+import { createMagpieVerifiedStore } from '../magpie-verified-store.js';
 import {
   invalidateKimiAccountUsage,
+  observeMagpieVerified,
+  setAccountUsageMagpieStore,
   setAccountUsageOAuthReader,
   readKimiCodingAccountUsage,
   readMagpieProviderAccountUsage,
@@ -509,20 +515,30 @@ describe('readProviderAccountUsage', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  // Unit: quota panel Magpie reads must work after restart when `projectCurrentModelSources`
-  // clears `discoveredSource`, never probe official integrations (e.g. DeepSeek), cache unsupported
-  // third-party endpoints, and share the cache slot with Settings/Composer.
-  it('reads Magpie quota after restart without discoveredSource, skips official routes, and shares cache with settings', async () => {
+  // Unit: background tray Magpie reads must NEVER probe unconfirmed custom APIs or non-Magpie
+  // routes in a mixed provider (zero key reads, zero fetches), must skip official integrations,
+  // and must read confirmed Magpie routes after restart while sharing cache with Settings/Composer.
+  it('only queries confirmed Magpie routes in background tray reads and never probes plain custom APIs', async () => {
     setAccountUsageProviderReader(id => id === 'official-deepseek'
       ? mkProvider({ id, routing: { pi: { upstream: 'https://api.deepseek.com/v1', authStrategy: 'api-key-header' } } })
       : id === 'plain'
         ? mkProvider({ id, routing: { pi: { upstream: 'https://plain.test/v1', authStrategy: 'api-key-header' } } })
         : mkProvider({
             id,
-            routing: { pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' } },
-            // No discoveredSource: simulates catalog state right after restart.
+            routing: {
+              'claude-code': { upstream: 'https://other-plain.test/v1', authStrategy: 'api-key-header' },
+              pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' },
+            },
+            // No projected discoveredSource: simulates catalog state right after restart.
             models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null }] },
           }));
+    const readKey = vi.fn((providerId: string, agent: AgentKind) => `sk-${providerId}-${agent}`);
+    setAccountUsageKeyReader(readKey);
+    setAccountUsageMagpieStore({
+      isKnown: (providerId, agent, endpoint) =>
+        providerId === 'magpie-restarted' && agent === 'pi' && endpoint === 'https://gateway.test/v1/magpie/quotas',
+      markVerified: () => false,
+    });
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => String(input).includes('gateway.test')
       ? jsonRes({
           object: 'list',
@@ -532,18 +548,102 @@ describe('readProviderAccountUsage', () => {
     setAccountUsageFetch(fetch);
 
     await expect(readMagpieProviderAccountUsage({ providerId: 'official-deepseek' })).resolves.toEqual({ status: 'unsupported' });
+    await expect(readMagpieProviderAccountUsage({ providerId: 'plain' })).resolves.toEqual({ status: 'unsupported' });
     expect(fetch).not.toHaveBeenCalled();
-
-    await expect(readMagpieProviderAccountUsage({ providerId: 'plain' })).resolves.toEqual({ status: 'unsupported' });
-    await expect(readMagpieProviderAccountUsage({ providerId: 'plain' })).resolves.toEqual({ status: 'unsupported' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(readKey).not.toHaveBeenCalled();
 
     const panel = await readMagpieProviderAccountUsage({ providerId: 'magpie-restarted' });
     expect(panel).toMatchObject({ status: 'ready', integration: 'magpie', agent: 'pi' });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenLastCalledWith('https://gateway.test/v1/magpie/quotas', expect.anything());
+    // Must not even read the API key for the unconfirmed claude-code route on the same provider.
+    expect(readKey.mock.calls.every(([id, agent]) => id === 'magpie-restarted' && agent === 'pi')).toBe(true);
     await expect(readProviderAccountUsage({ providerId: 'magpie-restarted', agent: 'pi' })).resolves.toEqual(panel);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  // Unit: a manual Magpie connection verified via Settings/Composer persists an endpoint-bound
+  // digest (no URLs or keys on disk), notifies tray subscribers, survives restart, and stops
+  // polling immediately if the route URL is later changed or the file is unreadable.
+  it('persists verified Magpie route digests across restarts and invalidates when the route URL changes', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'magpie-verified-test-'));
+    const file = path.join(dir, 'magpie-verified-providers.json');
+    try {
+      let scope = 'owner-a';
+      let currentUpstream = 'https://manual-magpie.test/v1';
+      const mkStore = () => createMagpieVerifiedStore({ filePath: () => file, scopeKey: () => scope });
+      const store1 = mkStore();
+      const bindProvider = () => setAccountUsageProviderReader(() => mkProvider({
+        id: 'manual-magpie',
+        routing: { pi: { upstream: currentUpstream, authStrategy: 'api-key-header' } },
+        models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null }] },
+      }));
+      const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonRes({
+        object: 'list',
+        data: [{ readAt: '2026-11-26T03:00:00Z', windows: [{ name: 'Gemini · 7 days', remaining: 50 }] }],
+      }));
+      bindProvider();
+      setAccountUsageKeyReader(() => 'sk-secret-do-not-persist');
+      setAccountUsageFetch(fetch);
+      let persistDone: Promise<boolean> = Promise.resolve(false);
+      setAccountUsageMagpieStore({
+        isKnown: (id, agent, endpoint) => store1.has(id, agent, endpoint),
+        markVerified: (id, agent, endpoint, isCurrent) => {
+          persistDone = store1.mark(id, agent, endpoint, isCurrent);
+          return persistDone;
+        },
+      });
+      const verifiedSpy = vi.fn();
+      const off = observeMagpieVerified(verifiedSpy);
+
+      // Before verification, background tray polling does not touch the endpoint.
+      await expect(readMagpieProviderAccountUsage({ providerId: 'manual-magpie' })).resolves.toEqual({ status: 'unsupported' });
+      expect(fetch).not.toHaveBeenCalled();
+
+      // Explicit Settings/Composer read confirms the gateway and persists its endpoint digest.
+      await expect(readProviderAccountUsage({ providerId: 'manual-magpie', agent: 'pi' })).resolves.toMatchObject({
+        status: 'ready', integration: 'magpie', agent: 'pi',
+      });
+      expect(await persistDone).toBe(true);
+      await vi.waitFor(() => expect(verifiedSpy).toHaveBeenCalledTimes(1));
+      off();
+      const rawDisk = fs.readFileSync(file, 'utf8');
+      expect(rawDisk).not.toContain('manual-magpie.test');
+      expect(rawDisk).not.toContain('sk-secret-do-not-persist');
+
+      // Simulate process restart: clear in-memory caches and construct a fresh store instance.
+      resetProviderAccountUsageForTest();
+      const store2 = mkStore();
+      bindProvider();
+      setAccountUsageKeyReader(() => 'sk-secret-do-not-persist');
+      setAccountUsageFetch(fetch);
+      setAccountUsageMagpieStore({
+        isKnown: (id, agent, endpoint) => store2.has(id, agent, endpoint),
+        markVerified: (id, agent, endpoint, isCurrent) => store2.mark(id, agent, endpoint, isCurrent),
+      });
+
+      await expect(readMagpieProviderAccountUsage({ providerId: 'manual-magpie' })).resolves.toMatchObject({
+        status: 'ready', integration: 'magpie', agent: 'pi',
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      // Editing the route URL invalidates the digest immediately: zero probes to the new host.
+      currentUpstream = 'https://other-non-magpie.test/v1';
+      await expect(readMagpieProviderAccountUsage({ providerId: 'manual-magpie' })).resolves.toEqual({ status: 'unsupported' });
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      // Corrupt/unreadable file fails closed and is preserved rather than overwritten.
+      currentUpstream = 'https://manual-magpie.test/v1';
+      fs.writeFileSync(file, '{not-valid-json', 'utf8');
+      const store3 = mkStore();
+      expect(store3.has('manual-magpie', 'pi', 'https://manual-magpie.test/v1/magpie/quotas')).toBe(false);
+      expect(await store3.mark('manual-magpie', 'pi', 'https://manual-magpie.test/v1/magpie/quotas')).toBe(false);
+      expect(fs.readFileSync(file, 'utf8')).toBe('{not-valid-json');
+      scope = 'owner-b';
+      expect(store3.has('manual-magpie', 'pi', 'https://manual-magpie.test/v1/magpie/quotas')).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns unsupported when no official route exists', async () => {
