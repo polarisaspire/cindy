@@ -33,6 +33,8 @@ export interface OrcaEnableTeamParams {
   /** 显式选定的模型来源;语义见 OrcaWorkerCreateParams.providerId。 */
   providerId?: string | null;
   delegateTask?: string;
+  /** Host-only: trusted Desktop UI IPC stamped owner-authored delegateTask. */
+  ownerAuthoredInitialTask?: true;
   /** UI 新建 Lead 时先建 Worker，把首任务留到 Lead 首条输入可查询后再派。 */
   deferDelegateTask?: boolean;
   /** 本次首个 Worker 权限；缺省读取 Worker 创建偏好。显式值同时更新后续默认。 */
@@ -108,6 +110,7 @@ export interface OrcaLifecycleDeps {
   dispatchWorkerTask(params: {
     targetSessionId: string;
     message: string;
+    ownerAuthoredText?: string;
     imagePaths?: string[];
     dispatchMeta: {
       source: string;
@@ -225,6 +228,7 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
   async function dispatchInitialTask(params: {
     workerSessionId: string;
     message: string | undefined;
+    ownerAuthoredText?: string;
     imagePaths?: string[];
     context: string;
   }, assertCurrent?: () => Promise<void>): Promise<DispatchWorkerTaskResult | undefined> {
@@ -245,6 +249,7 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
       const result = await deps.dispatchWorkerTask({
         targetSessionId: params.workerSessionId,
         message: params.message,
+        ...(params.ownerAuthoredText ? { ownerAuthoredText: params.ownerAuthoredText } : {}),
         ...(params.imagePaths ? { imagePaths: params.imagePaths } : {}),
         dispatchMeta: {
           source: dispatchSource,
@@ -298,6 +303,7 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
         dispatchResult = await dispatchInitialTask({
           workerSessionId: created.workerSessionId,
           message: initialTask,
+          ...(params.ownerAuthoredInitialTask ? { ownerAuthoredText: initialTask.trim() } : {}),
           ...(params.initialTaskImages ? { imagePaths: params.initialTaskImages } : {}),
           context: `create_worker/${created.workerSessionId}/initial_task`,
         }, assertCreatedCurrent);
@@ -494,6 +500,7 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
                 leadSessionId: params.leadSessionId,
                 initialTask: normalized.initialTask,
               }),
+          ...(params.ownerAuthoredInitialTask ? { ownerAuthoredText: normalized.initialTask } : {}),
           context: `enable_collab_mode/${created.workerSessionId}/delegate_task`,
         }, assertCreatedCurrent);
       } else {

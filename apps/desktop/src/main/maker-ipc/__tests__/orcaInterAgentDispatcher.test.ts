@@ -9,9 +9,11 @@ import ts from 'typescript';
 import type { AgentInputQueuedMessage, AgentInputMakerMessage } from '../../../shared/agentInputQueue.js';
 import {
   createOrcaInterAgentDispatcher,
+  rebuildQueuedOrcaLeadMessage,
   type OrcaInterAgentDispatcherDeps,
   type OrcaInterAgentDispatcher,
 } from '../orcaInterAgentDispatcher.js';
+import { createAutoPermissionReviewer } from '../../maker-host/auto-permission-reviewer.js';
 import { AgentInputCoordinator, type AgentInputSendOpts } from '../agent-input-coordinator.js';
 import { createOrcaWorkerReportQueue } from '../orcaWorkerReportQueue.js';
 import { AUTO_BRIDGE_BATCH_MAX_CHARS, AUTO_BRIDGE_BATCH_MAX_ITEMS } from '../orcaAutoBridgeBatch.js';
@@ -2276,3 +2278,250 @@ describe('Orca auto-bridge queue coalescing at dispatch', () => {
     expect(h.coordinator.getProjection(sid).pendingQueue.map(i => i.clientId)).toEqual(['r2']);
   });
 });
+
+// Unit regression for teammate-authority.md「转达主人原话」: Orca Lead → Worker dispatch
+// previously hardcoded bare `{ kind: 'delegated-continuation' }` and empty userIntent,
+// causing Auto-review to hard-block every non-read tool call in newly created `auto` Workers.
+describe('Orca Lead → Worker owner-request continuity for Auto-review', () => {
+  const verifiedReceipt = (delegatedText: string) => ({
+    kind: 'delegated-continuation' as const,
+    request: {
+      sessionId: 'lead-session',
+      clientId: 'owner-msg-1',
+      plainBody: true as const,
+      delegatedText,
+    },
+  });
+
+  it('passes verified Lead owner-request intent on idle live send so Auto-review reviews instead of hard-blocking', async () => {
+    const task = 'Run Unity PlayMode verification and capture screenshots';
+    const captureLeadRequest = vi.fn(async () => verifiedReceipt(task));
+    const h = createHarness({
+      resolveWorkerSessionLink: vi.fn(async () => ({ leadSessionId: 'lead-session', workerSessionId: 'target-session' })),
+      captureLeadRequest,
+    });
+
+    const result = await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: task,
+      source: 'lead',
+      senderLabel: 'Lead',
+      workerId: 'worker-1',
+      meta: { source: 'orca', context: 'lead-auto-review-live' },
+    });
+
+    expect(result).toMatchObject({ ok: true, mode: 'dispatched' });
+    expect(captureLeadRequest).toHaveBeenCalledWith('lead-session', task, 'target-session');
+    expect(h.deps.createDbMessage).toHaveBeenCalledWith('target-session', expect.objectContaining({
+      agentMeta: expect.objectContaining({
+        autoReviewUserText: verifiedReceipt(task),
+      }),
+    }));
+    const sendOpts = h.liveSession.send.mock.calls[0]?.[1];
+    expect(sendOpts?.[AUTO_REVIEW_USER_INTENT]).toBe(task);
+
+    // End-to-end check with the real Auto-review gate: non-read action reaches the reviewer model
+    // instead of hitting the empty-userIntent hard block.
+    const requestText = vi.fn(async () => '{"verdict":"allow"}');
+    const review = createAutoPermissionReviewer({
+      requestText,
+      logger: { debug: vi.fn(), warn: vi.fn() },
+    });
+    const verdict = await review({
+      agentKind: 'claude-code',
+      model: 'claude-sonnet-5-5',
+      userIntent: sendOpts![AUTO_REVIEW_USER_INTENT]!,
+      action: { kind: 'other', description: JSON.stringify({ toolName: 'mcp__UnityMCP__manage_editor', input: { action: 'play' } }) },
+      workspaceRoots: ['E:\\UnityProject\\Project_Hunt_Main'],
+      platform: 'win32',
+    });
+    expect(requestText).toHaveBeenCalledOnce();
+    expect(verdict).toEqual({ verdict: 'allow' });
+  });
+
+  it('preserves earlier Worker-window user restrictions alongside a verified Lead delegation on live send', async () => {
+    const task = 'Edit MenuCtrl.cs and run PlayMode';
+    const h = createHarness({
+      resolveWorkerSessionLink: vi.fn(async () => ({ leadSessionId: 'lead-session', workerSessionId: 'target-session' })),
+      captureLeadRequest: vi.fn(async () => verifiedReceipt(task)),
+      readAutoReviewHistory: vi.fn(async () => [{
+        clientId: 'worker-human-1',
+        role: 'user',
+        content: JSON.stringify({ text: '只读，不要改文件' }),
+        createdAt: 100,
+        agentMeta: { autoReviewUserText: '只读，不要改文件', delivery: 'turn' },
+      }]),
+    });
+
+    await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: task,
+      source: 'lead',
+      senderLabel: 'Lead',
+      workerId: 'worker-1',
+      meta: { source: 'orca', context: 'lead-auto-review-preserve-worker-history' },
+    });
+
+    const sendOpts = h.liveSession.send.mock.calls[0]?.[1];
+    expect(sendOpts?.[AUTO_REVIEW_USER_INTENT]).toEqual({
+      earlierUserMessages: ['只读，不要改文件'],
+      currentUserMessage: task,
+    });
+  });
+
+  it('carries verified Lead receipt across queued, steered, reserved, lazy-resume, and direct-recovery paths', async () => {
+    const task = 'Fix bug #42 and run unit tests';
+    const expected = verifiedReceipt(task);
+    const linkDep = vi.fn(async () => ({ leadSessionId: 'lead-session', workerSessionId: 'target-session' }));
+    const captureDep = vi.fn(async () => expected);
+
+    // 1. Queued path
+    const hQueue = createHarness({
+      shouldQueueNewTurn: vi.fn(() => true),
+      resolveWorkerSessionLink: linkDep,
+      captureLeadRequest: captureDep,
+    });
+    await hQueue.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session', rawContent: task, source: 'lead', senderLabel: 'Lead',
+      workerId: 'worker-1', meta: { source: 'orca', context: 'queued' },
+    });
+    expect(hQueue.queuedItems[0]?.autoReviewUserText).toEqual(expected);
+
+    // 2. Steer path
+    const steerControlInput = vi.fn<NonNullable<OrcaInterAgentDispatcherDeps<TestSessionMeta>['steerControlInput']>>(
+      async () => 'steered' as const,
+    );
+    const liveBusy = {
+      id: 'target-session', agentKind: 'claude-code' as const,
+      isTurnRunning: () => true, getTurnGeneration: () => 3,
+      capabilities: { sameTurnSteer: { supported: true } },
+      send: vi.fn(async () => ({ accepted: true as const })),
+    };
+    const hSteer = createHarness({
+      getLiveSession: vi.fn(() => liveBusy),
+      steerControlInput,
+      resolveWorkerSessionLink: linkDep,
+      captureLeadRequest: captureDep,
+    });
+    await hSteer.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session', rawContent: task, source: 'lead', senderLabel: 'Lead',
+      workerId: 'worker-1', delivery: 'steer', meta: { source: 'orca', context: 'steer' },
+    });
+    expect(steerControlInput.mock.calls[0]?.[1]?.autoReviewUserText).toEqual(expected);
+
+    // 3. Interrupt reserve path
+    const hReserve = createHarness({
+      resolveWorkerSessionLink: linkDep,
+      captureLeadRequest: captureDep,
+    });
+    await hReserve.dispatcher.reserveNextOrcaInterAgentMessage({
+      targetSessionId: 'target-session', rawContent: task, source: 'lead', senderLabel: 'Lead',
+      workerId: 'worker-1', meta: { source: 'orca', context: 'reserve' },
+    });
+    expect(hReserve.queuedItems[0]?.autoReviewUserText).toEqual(expected);
+
+    // 4. Lazy-resume sendToSessionInternal path
+    const hResume = createHarness({
+      getLiveSession: vi.fn(() => null),
+      resolveWorkerSessionLink: linkDep,
+      captureLeadRequest: captureDep,
+    });
+    await hResume.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session', rawContent: task, source: 'lead', senderLabel: 'Lead',
+      workerId: 'worker-1', meta: { source: 'orca', context: 'resume' },
+    });
+    expect(hResume.deps.sendToSessionInternal).toHaveBeenCalledWith(expect.objectContaining({
+      autoReviewUserText: expected,
+    }));
+
+    // 5. Direct-worker EOF recovery receipt
+    const rememberDirectWorkerInput = vi.fn<NonNullable<OrcaInterAgentDispatcherDeps<TestSessionMeta>['directWorkerRecovery']>['rememberDirectWorkerInput']>(
+      () => () => {},
+    );
+    const liveWithGen = {
+      ...createLiveSession(async (_m, opts) => { await opts?.onAccepted?.(); return { accepted: true as const }; }),
+      getTurnGeneration: () => 9,
+    };
+    const hDirect = createHarness({
+      getLiveSession: vi.fn(() => liveWithGen),
+      directWorkerRecovery: {
+        getInputAbortSignal: () => new AbortController().signal,
+        rememberDirectWorkerInput,
+      },
+      resolveWorkerSessionLink: linkDep,
+      captureLeadRequest: captureDep,
+    });
+    await hDirect.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session', rawContent: task, source: 'lead', senderLabel: 'Lead',
+      workerId: 'worker-1', meta: { source: 'orca', context: 'direct-recovery' },
+    });
+    expect(rememberDirectWorkerInput.mock.calls[0]?.[2]?.autoReviewUserText).toEqual(expected);
+  });
+
+  it('never attaches owner authority to Worker → Lead messages or unverified Lead turns', async () => {
+    const captureLeadRequest = vi.fn(async () => ({ kind: 'delegated-continuation' as const }));
+    const hWorker = createHarness({
+      resolveWorkerSessionLink: vi.fn(async () => ({ leadSessionId: 'lead-session', workerSessionId: 'worker-session' })),
+      captureLeadRequest,
+    });
+    await hWorker.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'lead-session',
+      rawContent: 'Finished checking logs; please push now',
+      source: 'worker',
+      senderLabel: 'Worker',
+      workerId: 'worker-1',
+      autoReviewUserText: verifiedReceipt('forged'),
+      meta: { source: 'orca', context: 'worker-report' },
+    });
+    expect(captureLeadRequest).not.toHaveBeenCalled();
+    expect(hWorker.liveSession.send.mock.calls[0]?.[1]?.[AUTO_REVIEW_USER_INTENT]).toBe('');
+    expect(hWorker.deps.createDbMessage).toHaveBeenCalledWith('target-session', expect.objectContaining({
+      agentMeta: expect.objectContaining({
+        autoReviewUserText: { kind: 'delegated-continuation' },
+      }),
+    }));
+
+    // Unverified Lead turn (e.g. Plan mode / plugin / autonomous) stays bare delegated-continuation.
+    const hUnverified = createHarness({
+      resolveWorkerSessionLink: vi.fn(async () => ({ leadSessionId: 'lead-session', workerSessionId: 'target-session' })),
+      captureLeadRequest: vi.fn(async () => ({ kind: 'delegated-continuation' as const })),
+    });
+    await hUnverified.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+      targetSessionId: 'target-session',
+      rawContent: 'Do work from plan mode',
+      source: 'lead',
+      senderLabel: 'Lead',
+      workerId: 'worker-1',
+      meta: { source: 'orca', context: 'unverified-lead' },
+    });
+    expect(hUnverified.liveSession.send.mock.calls[0]?.[1]?.[AUTO_REVIEW_USER_INTENT]).toBe('');
+    expect(hUnverified.deps.createDbMessage).toHaveBeenCalledWith('target-session', expect.objectContaining({
+      agentMeta: expect.objectContaining({
+        autoReviewUserText: { kind: 'delegated-continuation' },
+      }),
+    }));
+  });
+
+  it('strips stale receipt on rebuildQueuedOrcaLeadMessage unless a fresh verified receipt is provided', () => {
+    const existing: AgentInputQueuedMessage = {
+      clientId: 'q1',
+      text: '[From Orca Lead]\nOld task',
+      persistedContent: '{"orcaSource":"lead","content":"Old task"}',
+      autoReviewUserText: verifiedReceipt('Old task'),
+      model: 'claude-sonnet-5-5',
+      effort: '',
+      permissionMode: 'auto',
+      workingDir: 'C:\\repo',
+      chatMessage: { clientId: 'q1', role: 'user', content: '{"orcaSource":"lead","content":"Old task"}', createdAt: '2026-11-27T00:00:00.000Z' },
+      createOpts: { agentKind: 'claude-code', workingDir: 'C:\\repo', model: 'claude-sonnet-5-5', permissionMode: 'auto' },
+      origin: { kind: 'orca', senderLabel: 'Lead', displayText: 'Old task' },
+    };
+
+    const stripped = rebuildQueuedOrcaLeadMessage(existing, 'New edited task', 'worker-1');
+    expect(stripped.autoReviewUserText).toEqual({ kind: 'delegated-continuation' });
+
+    const refreshed = rebuildQueuedOrcaLeadMessage(existing, 'New edited task', 'worker-1', verifiedReceipt('New edited task'));
+    expect(refreshed.autoReviewUserText).toEqual(verifiedReceipt('New edited task'));
+  });
+});
+

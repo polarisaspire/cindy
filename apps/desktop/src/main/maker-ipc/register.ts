@@ -3257,6 +3257,8 @@ interface EnableOrcaOptions {
   modelGroup?: string;
   workerAgent: EngineKind;
   delegateTask?: string;
+  /** Host-only: trusted Desktop UI IPC stamped owner-authored delegateTask. */
+  ownerAuthoredInitialTask?: true;
   role?: string;
   label?: string;
   model?: string;
@@ -12339,6 +12341,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       fast: opts.fast,
       providerId: opts.providerId,
       delegateTask: opts.delegateTask,
+      ...(opts.ownerAuthoredInitialTask ? { ownerAuthoredInitialTask: true as const } : {}),
       deferDelegateTask: opts.deferDelegateTask,
       workerPermissionMode: opts.workerPermissionMode,
       ...(opts.executionDeviceId
@@ -16068,6 +16071,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return queued;
   }
 
+  const captureOrcaLeadRequest = async (
+    leadSessionId: string,
+    message: string,
+    targetSessionId: string,
+  ): Promise<AgentRequestReceipt> => {
+    const captured = await captureSessionAgentRequest(leadSessionId, message, { sessionId: targetSessionId });
+    return verifiedOwnerRequestText(captured.autoReviewUserText) !== undefined
+      ? { kind: 'delegated-continuation', request: captured.autoReviewUserText.request }
+      : { kind: 'delegated-continuation' };
+  };
+
   const workerInputs = new WeakSet<object>();
   const orcaInterAgentDispatcher: OrcaInterAgentDispatcher = createOrcaInterAgentDispatcher({
     directWorkerRecovery: {
@@ -16176,6 +16190,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const worker = (await listWorkersByLead(link.leadSessionId)).find((w) => w.id === workerId);
       return worker?.role ?? fallback;
     },
+    captureLeadRequest: captureOrcaLeadRequest,
     resolveWorkerSessionLink: async (workerId) => {
       const link = await getWorkerLink({ workerId });
       return link ? { leadSessionId: link.leadSessionId, workerSessionId: link.workerSessionId } : null;
@@ -16274,6 +16289,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ...project.fields,
         workerAgent,
         delegateTask,
+        ...(!getDeviceLinkInvokeContext()?.sharedTask ? { ownerAuthoredInitialTask: true as const } : {}),
         role: typeof body.role === 'string' ? body.role : undefined,
         label: typeof body.label === 'string' ? body.label : undefined,
         model: typeof body.model === 'string' ? body.model : undefined,
@@ -16360,6 +16376,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                   initialTask: initialTask.trim(),
                   snapshotBeforeMs,
                 }),
+            ...(!getDeviceLinkInvokeContext()?.sharedTask ? { ownerAuthoredText: initialTask.trim() } : {}),
           }, assertCurrent);
           if (!result.ok) throwOrcaServiceFailure(result);
           return result;
@@ -16597,6 +16614,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       label: label.value,
       initialTask:
         typeof b.initialTask === 'string' && b.initialTask.length > 0 ? b.initialTask : undefined,
+      ...(!getDeviceLinkInvokeContext()?.sharedTask ? { ownerAuthoredInitialTask: true as const } : {}),
       // 运行设备与那台上的目录(可选)；旧控制端不带，行为不变。
       ...(typeof b.executionDeviceId === 'string' && b.executionDeviceId.trim()
         ? {
@@ -16862,10 +16880,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       getAgentIslandService()?.notifyQueueEmptied(leadSessionId);
     },
+    captureLeadRequest: captureOrcaLeadRequest,
     dispatchWorkerMessage: async ({
       targetSessionId,
       message,
       workerId,
+      ownerAuthoredText,
       delivery,
       imagePaths,
       dispatchMeta,
@@ -16873,12 +16893,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       onAcceptedRollback,
       onAcceptedCommit,
     }) => {
+      const trimmedOwnerText = ownerAuthoredText?.trim();
+      const ownerLink = trimmedOwnerText ? await getWorkerLink({ workerId }) : null;
       const result = await dispatchOrEnqueueOrcaInterAgentMessage({
         targetSessionId,
         rawContent: message,
         source: 'lead',
         senderLabel: 'Lead',
         workerId,
+        ...(trimmedOwnerText
+          ? {
+              autoReviewUserText: {
+                kind: 'delegated-continuation' as const,
+                request: {
+                  sessionId: ownerLink?.leadSessionId ?? targetSessionId,
+                  clientId: `ui-worker-task:${createId()}`,
+                  plainBody: true as const,
+                  delegatedText: trimmedOwnerText,
+                },
+              },
+            }
+          : {}),
         ...(delivery ? { delivery } : {}),
         ...(imagePaths ? { imagePaths } : {}),
         meta: dispatchMeta,

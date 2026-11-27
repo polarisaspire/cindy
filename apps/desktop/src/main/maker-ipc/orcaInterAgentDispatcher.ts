@@ -3,8 +3,14 @@ import {
   formatAgentMessage,
   formatOrcaCommunicationMessage,
 } from '@cindy/orca-workflow';
-import { AUTO_REVIEW_DELEGATED_CONTINUATION, AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT } from '@cindy/maker-core';
+import {
+  AUTO_REVIEW_DELEGATED_CONTINUATION,
+  AUTO_REVIEW_SOURCE_CONTENT,
+  AUTO_REVIEW_USER_INTENT,
+  appendAutoReviewUserIntent,
+} from '@cindy/maker-core';
 import { restoreAutoReviewUserIntent, type AutoReviewHistoryMessage } from './autoReviewUserIntent.js';
+import { verifiedOwnerRequestText, type AgentRequestReceipt } from '../../shared/forwardedRequest.js';
 import type { AgentKind, EngineKind, SessionSendOptions, SessionSendResult, UserMessage } from '@cindy/maker-core';
 
 import type {
@@ -74,6 +80,12 @@ export interface DispatchOrcaInterAgentMessageParams {
   delivery?: 'queue' | 'steer';
   /** 可选, 随消息发给目标的本机图片绝对路径; 仅本机 session 支持, SSH 远端目标拒绝。 */
   imagePaths?: string[];
+  /**
+   * Host-only owner request receipt for Lead → Worker dispatch (never honored for `source === 'worker'`).
+   * Trusted Desktop UI IPC may supply owner-authored text directly; MCP Lead calls omit it so the
+   * dispatcher captures the active Lead turn via `deps.captureLeadRequest`.
+   */
+  autoReviewUserText?: AgentInputQueuedMessage['autoReviewUserText'];
   /** Synchronous reserve boundary hook; must return before drain is scheduled. */
   onReserved?: () => void;
   beforeReserve?: () => Promise<void>;
@@ -143,7 +155,7 @@ export type OrcaInterAgentSendToSessionInternalResult =
 
 /** 通过既有 sendToSessionInternal 重建或排队目标 session 时传入的最小参数。 */
 export interface OrcaInterAgentSendToSessionInternalParams {
-  autoReviewUserText: { kind: 'delegated-continuation' };
+  autoReviewUserText: AgentInputQueuedMessage['autoReviewUserText'];
   targetSessionId: string;
   message: string;
   persistedContent: string;
@@ -259,6 +271,16 @@ export interface OrcaInterAgentDispatcherDeps<TSessionMeta> {
    * 反查 worker 所在的 Lead / Worker 会话，给消息来源标签定位发送方会话。
    * 缺省或查不到时消息仍照常投递，只是来源不可点击跳转。
    */
+  /**
+   * Host-captured owner request receipt for Lead → Worker dispatch (`source === 'lead'` only).
+   * Returns a `{ kind: 'delegated-continuation', request? }` receipt; only owner-verified
+   * Lead turns carry `request` so newly created `auto` Workers review against the delegated task.
+   */
+  captureLeadRequest?: (
+    leadSessionId: string,
+    message: string,
+    targetSessionId: string,
+  ) => Promise<AgentRequestReceipt>;
   resolveWorkerSessionLink?: (
     workerId: string,
   ) => Promise<{ leadSessionId: string; workerSessionId: string } | null>;
@@ -432,6 +454,9 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         ],
       };
     };
+    let autoReviewUserTextPromise: Promise<AgentInputQueuedMessage['autoReviewUserText']> | undefined;
+    const resolveAutoReviewUserText = (): Promise<AgentInputQueuedMessage['autoReviewUserText']> =>
+      (autoReviewUserTextPromise ??= resolveOrcaAutoReviewUserText(deps, params));
     let revokeDirectReceipt: (() => void) | undefined;
     let acceptedDidRun = false;
     const runAccepted = async (): Promise<void> => {
@@ -446,6 +471,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         const item = buildQueuedOrcaInterAgentMessage({
           clientId, agentMessageText: await buildAgentMessageText(), persistedContent,
           origin: await resolveOrigin(), createOpts, files: imageFiles,
+          autoReviewUserText: await resolveAutoReviewUserText(),
         });
         revokeDirectReceipt = recovery.rememberDirectWorkerInput(runtime, generation, item, signal);
       }
@@ -504,6 +530,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         persistedContent,
         origin: await resolveOrigin(),
         createOpts,
+        autoReviewUserText: await resolveAutoReviewUserText(),
         ...(imageFiles.length ? { files: imageFiles } : {}),
       });
       if (params.source === 'worker' && params.workerId) {
@@ -557,6 +584,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
             persistedContent,
             origin: await resolveOrigin(),
             createOpts,
+            autoReviewUserText: await resolveAutoReviewUserText(),
             ...(imageFiles.length ? { files: imageFiles } : {}),
           });
           if (params.source === 'worker' && params.workerId) {
@@ -625,9 +653,10 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
       const sendToInternal = async (): Promise<DispatchOrcaInterAgentMessageResult> => {
         const message = await buildAgentMessageText();
         const origin = await resolveOrigin();
+        const autoReviewUserText = await resolveAutoReviewUserText();
         deliveryAttempt.started = true;
         const result = await deps.sendToSessionInternal({
-          autoReviewUserText: { kind: 'delegated-continuation' },
+          autoReviewUserText,
           targetSessionId: params.targetSessionId,
           message,
           persistedContent,
@@ -715,6 +744,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
           return null;
         }
         const origin = await resolveOrigin();
+        const autoReviewUserText = await resolveAutoReviewUserText();
         const agentMessage = await agentMessageTextWithImages();
         if (params.source === 'worker' && deps.shouldQueueNewTurn(params.targetSessionId, true)) {
           return enqueueQueuedMessage('orca report queued after preparation');
@@ -727,6 +757,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
           source: params.meta.source,
           context: params.meta.context,
           origin,
+          autoReviewUserText,
           shouldDefer: params.source === 'worker'
             ? () => deps.shouldQueueNewTurn(params.targetSessionId, true) : undefined,
           onSendAttempt: () => { deliveryAttempt.started = true; },
@@ -809,6 +840,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
     const workerRole = await resolveOrcaWorkerRole(deps, params);
     const senderLabel = workerRole ?? params.senderLabel;
     const senderSessionId = await resolveOrcaSenderSessionId(deps, params);
+    const autoReviewUserText = await resolveOrcaAutoReviewUserText(deps, params);
     const queued = buildQueuedOrcaInterAgentMessage({
       clientId,
       agentMessageText: formatAgentMessage(params.source, params.rawContent, params.workerId, workerRole),
@@ -820,6 +852,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         ...(senderSessionId ? { senderSessionId } : {}),
       },
       createOpts,
+      autoReviewUserText,
     });
     const callbackAlreadyRegistered = queuedAccepted.has(clientId);
     if (params.onAccepted && !callbackAlreadyRegistered) {
@@ -949,6 +982,28 @@ async function resolveOrcaSenderSessionId<TSessionMeta>(
   }
 }
 
+/**
+ * Lead → Worker 派单时捕获宿主核实的主人请求凭据（Worker → Lead 永不携带授权）。
+ * 只有经过宿主验证的委托才附带 `request`；未核实（Plan / 插件 / 自主轮）退回裸 `delegated-continuation`。
+ */
+async function resolveOrcaAutoReviewUserText<TSessionMeta>(
+  deps: OrcaInterAgentDispatcherDeps<TSessionMeta>,
+  params: Pick<
+    DispatchOrcaInterAgentMessageParams,
+    'source' | 'workerId' | 'rawContent' | 'targetSessionId' | 'autoReviewUserText'
+  >,
+): Promise<AgentInputQueuedMessage['autoReviewUserText']> {
+  if (params.source !== 'lead') return { kind: 'delegated-continuation' };
+  if (params.autoReviewUserText !== undefined) return params.autoReviewUserText;
+  if (!deps.captureLeadRequest) return { kind: 'delegated-continuation' };
+  const leadSessionId = await resolveOrcaSenderSessionId(deps, params);
+  if (!leadSessionId) return { kind: 'delegated-continuation' };
+  const captured = await deps.captureLeadRequest(leadSessionId, params.rawContent, params.targetSessionId);
+  return verifiedOwnerRequestText(captured) !== undefined
+    ? { kind: 'delegated-continuation', request: captured.request }
+    : { kind: 'delegated-continuation' };
+}
+
 async function sendPersistedUserMessageToSession<TSessionMeta>(
   deps: OrcaInterAgentDispatcherDeps<TSessionMeta>,
   params: {
@@ -959,15 +1014,23 @@ async function sendPersistedUserMessageToSession<TSessionMeta>(
     source: string;
     context: string;
     origin?: AgentInputQueuedMessage['origin'];
+    autoReviewUserText?: AgentInputQueuedMessage['autoReviewUserText'];
     shouldDefer?: () => boolean;
     onSendAttempt: () => void;
     onAccepted?: () => void | Promise<void>;
   },
 ): Promise<(CollabDirectDispatchResult & { reportRejected?: true }) | null> {
   const { session, dbContent, agentMessage, clientId = deps.createId(), source, context, origin, onAccepted } = params;
+  const autoReviewUserText = params.autoReviewUserText ?? { kind: 'delegated-continuation' as const };
   let turnChangeSetStarted = false;
   let rejected = false;
   const humanIntent = restoreAutoReviewUserIntent(await deps.readAutoReviewHistory?.(session.id) ?? []);
+  const verifiedText = typeof autoReviewUserText === 'string'
+    ? autoReviewUserText
+    : verifiedOwnerRequestText(autoReviewUserText);
+  const autoReviewIntent = verifiedText !== undefined
+    ? appendAutoReviewUserIntent(humanIntent, verifiedText)
+    : humanIntent;
   const pendingHandoff = await deps.peekPendingHandoff?.(session.id);
   const outgoingMessage = pendingHandoff
     ? prependHandoffToUserMessage(agentMessage, pendingHandoff) as UserMessage
@@ -981,8 +1044,8 @@ async function sendPersistedUserMessageToSession<TSessionMeta>(
       const sendResult = await session.send(outgoingMessage, {
         planMode: false,
         throwOnStartFailure: true,
-        [AUTO_REVIEW_SOURCE_CONTENT]: '',
-        [AUTO_REVIEW_USER_INTENT]: humanIntent,
+        [AUTO_REVIEW_SOURCE_CONTENT]: typeof autoReviewUserText === 'string' ? autoReviewUserText : '',
+        [AUTO_REVIEW_USER_INTENT]: autoReviewIntent,
         [AUTO_REVIEW_DELEGATED_CONTINUATION]: true,
         onAccepted: async () => {
           // maker-core 会在 vendor handle.send 前 await 此 hook；必须先落库，再运行 accepted 副作用。
@@ -990,7 +1053,7 @@ async function sendPersistedUserMessageToSession<TSessionMeta>(
             clientId,
             role: 'user',
             content: dbContent,
-            agentMeta: { ...(origin ? { origin } : {}), autoReviewUserText: { kind: 'delegated-continuation' }, delivery: 'turn' },
+            agentMeta: { ...(origin ? { origin } : {}), autoReviewUserText, delivery: 'turn' },
           });
           await deps.beginDirectTurnChangeSet(session.id, clientId);
           turnChangeSetStarted = true;
@@ -1032,6 +1095,7 @@ export function rebuildQueuedOrcaLeadMessage(
   entry: AgentInputQueuedMessage,
   rawContent: string,
   workerId?: string,
+  autoReviewUserText?: AgentInputQueuedMessage['autoReviewUserText'],
 ): AgentInputQueuedMessage {
   const agentMessageText = formatAgentMessage('lead', rawContent, workerId);
   const persistedContent = formatOrcaCommunicationMessage('lead', rawContent);
@@ -1039,6 +1103,8 @@ export function rebuildQueuedOrcaLeadMessage(
     ...entry,
     text: agentMessageText,
     persistedContent,
+    // Rewriting the body invalidates any previous delegatedText receipt unless freshly re-captured.
+    autoReviewUserText: autoReviewUserText ?? { kind: 'delegated-continuation' },
     chatMessage: {
       ...entry.chatMessage,
       content: persistedContent,
@@ -1082,13 +1148,14 @@ function buildQueuedOrcaInterAgentMessage(params: {
   persistedContent: string;
   origin: NonNullable<AgentInputQueuedMessage['origin']>;
   createOpts: AgentInputCreateOpts;
+  autoReviewUserText?: AgentInputQueuedMessage['autoReviewUserText'];
   files?: AgentInputSerializedFile[];
 }): AgentInputQueuedMessage {
   const createdAt = new Date().toISOString();
   return {
     clientId: params.clientId,
     text: params.agentMessageText,
-    autoReviewUserText: { kind: 'delegated-continuation' },
+    autoReviewUserText: params.autoReviewUserText ?? { kind: 'delegated-continuation' },
     persistedContent: params.persistedContent,
     model: params.createOpts.model,
     effort: params.createOpts.effort ?? '',
