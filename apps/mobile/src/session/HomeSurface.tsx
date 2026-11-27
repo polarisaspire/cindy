@@ -50,7 +50,6 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
-  RefreshControl,
   ScrollView,
   SectionList,
   StyleSheet,
@@ -345,6 +344,7 @@ import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
 import { fontWeight, iconSize, iconStroke, lineHeight, motionDuration, navigationChrome, radius, spacing, typeScale } from '@/theme/tokens';
 import { mobileInteractionStyles } from '@/components/mobileInteractionStyles';
 import { useReduceMotionEnabled } from '@/hooks/useReduceMotion';
+import { HomePullRefreshControl } from './HomePullRefreshControl';
 
 const LIST_LIMIT = 200;
 // Keep the device-link channel responsive while All Sessions hydrates several
@@ -1524,7 +1524,7 @@ function HomeScreenContent({ active = true, width, newSessionInSystemBar = false
   const refreshHome = useCallback(() => {
     const owner = accountGeneration;
     const scope = displayOrderScopeRef.current;
-    void loadHome({ visible: true }).then(async () => {
+    const completion = loadHome({ visible: true }).then(async () => {
       // A refresh queued behind startup must wait for that queued batch too.
       while (syncInFlightRef.current) await syncInFlightRef.current;
       if (homeAccountGenerationRef.current !== owner || displayOrderScopeRef.current !== scope) return;
@@ -1533,10 +1533,12 @@ function HomeScreenContent({ active = true, width, newSessionInSystemBar = false
       await reloadHostProjectOrderRef.current?.();
       if (homeAccountGenerationRef.current === owner && displayOrderScopeRef.current === scope) resetDisplayOrder();
     });
-    if (!homeRoster) return;
-    void homeRoster.roster.refresh();
-    if (homeRoster.groups.supported) void homeRoster.groups.refresh();
-    setTeammatesRefreshKey(key => key + 1);
+    if (homeRoster) {
+      void homeRoster.roster.refresh();
+      if (homeRoster.groups.supported) void homeRoster.groups.refresh();
+      setTeammatesRefreshKey(key => key + 1);
+    }
+    return completion;
   }, [accountGeneration, homeRoster, loadHome, resetDisplayOrder]);
   loadHomeRef.current = loadHome;
 
@@ -3527,9 +3529,8 @@ function HomeScreenContent({ active = true, width, newSessionInSystemBar = false
         updateCellsBatchingPeriod={32}
         windowSize={HOME_LIST_WINDOW_SIZE}
         refreshControl={
-          <RefreshControl
+          <HomePullRefreshControl
             progressViewOffset={residentList.enabled ? 0 : chromeHeight}
-            refreshing={refreshing}
             onRefresh={refreshHome}
             tintColor={colors.textSecondary}
           />

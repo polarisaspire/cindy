@@ -15,6 +15,7 @@ type Failure = { ok: false; errorCode: 'NOT_FOUND' | 'REMOTE_UNAVAILABLE' | 'INV
 
 export interface TaskDigestSessionFacts {
   followerBotId?: string | null;
+  pinned?: boolean;
   title: string;
   status: string;
   route: TaskDigestRoute | null;
@@ -289,6 +290,7 @@ function assemble(input: {
   return {
     session_id: input.key,
     device: input.device,
+    ...(input.facts.pinned !== undefined && { pinned: input.facts.pinned }),
     title: watched?.title || input.facts.title,
     phase,
     elapsed_minutes: minutesSince(input.now, since),
@@ -340,6 +342,7 @@ export function sessionFactsFromRow(row: unknown): TaskDigestSessionFacts | null
   const clearedAt = typeof record.clearedAt === 'number' ? record.clearedAt
     : typeof record.clearedAt === 'string' ? Date.parse(record.clearedAt) : NaN;
   return {
+    ...(record.pinnedAt !== undefined && { pinned: record.pinnedAt !== null }),
     title: text(record.title) ?? '',
     status: text(record.status) ?? 'active',
     ...(Number.isFinite(clearedAt) ? { clearedAt } : {}),
