@@ -6,6 +6,7 @@ import { isSessionSharedTaskActive } from '../device-link/sharedTaskDispatch.js'
 import { getGoalController } from '../goal-host/index.js';
 import { getSessionRowSnapshot } from '../localDb/sessionDispatchSnapshot.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
+import { readProviderAccountUsage } from '../maker-host/provider-account-usage.js';
 import { isRemoteProviderInvocationAllowed } from '../maker-host/remote-provider-access-store.js';
 import { readWorkerAgentLocations } from '../maker-ipc/workerAgentLocations.js';
 import { getQuotaOverviewService } from '../quota-overview/service.js';
@@ -63,6 +64,7 @@ export const resolver = createModelGroupResolver({
     return result.result as { binaryReady?: boolean } | null | undefined;
   }),
   quotaWindows,
+  readLocalMagpieUsage: readProviderAccountUsage,
   // 其他电脑与分享来的来源：与插件卡片里的远程模型同一份位置名单与同一条目录读取。
   locations: readWorkerAgentLocations,
   // 带上 stale：读不到时底层会给上次的目录，选路不能把它当成那台现在能用。

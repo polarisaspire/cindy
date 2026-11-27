@@ -3,6 +3,8 @@ import type { AgentKind, Provider, ProviderView } from '@cindy/model-providers';
 export interface MagpieQuotaSnapshot {
   kind: 'magpie-quota';
   accounts: Array<{
+    providerId?: string;
+    disabled?: boolean;
     windows: Array<{ name: string; remaining: number; resetsAt: number | null; pool?: 'gemini' | 'claude-gpt' }>;
     readAt: number | null;
     error: boolean;
@@ -50,7 +52,13 @@ export function parseMagpieQuota(value: unknown, fetchedAt: number): MagpieQuota
       windows.push({ name: window.name, remaining: window.remaining, resetsAt: Number.isFinite(reset) ? reset : null, ...(pool ? { pool } : {}) });
     }
     const readAt = typeof account.readAt === 'string' ? Date.parse(account.readAt) : NaN;
-    return { windows, readAt: Number.isFinite(readAt) ? readAt : null, error: !!account.error };
+    // This is the public model namespace, not a login or account identifier.
+    const providerId = typeof account.provider === 'string' && /^[\w.-]{1,128}$/.test(account.provider) ? account.provider : null;
+    return {
+      ...(providerId ? { providerId } : {}),
+      ...(account.on === false ? { disabled: true } : {}),
+      windows, readAt: Number.isFinite(readAt) ? readAt : null, error: !!account.error,
+    };
   });
   return { kind: 'magpie-quota', accounts, fetchedAt };
 }
@@ -58,9 +66,15 @@ export function parseMagpieQuota(value: unknown, fetchedAt: number): MagpieQuota
 /** A task has no upstream-account routing receipt. Never combine several accounts
  * or substitute an unrelated family's quota for the selected model. */
 export function magpieQuotaWindowsForModel(snapshot: MagpieQuotaSnapshot | null, modelId: string | null | undefined, now: number) {
-  if (!snapshot || snapshot.accounts.length !== 1 || snapshot.accounts[0].error || !modelId) return [];
-  const pool = /(?:^|[/:._-])gemini(?:$|[/:._-]|\d)/i.test(modelId) ? 'gemini'
-    : /(?:^|[/:._-])(?:claude|gpt|chatgpt|codex)(?:$|[/:._-]|\d)/i.test(modelId) ? 'claude-gpt' : null;
-  return snapshot.accounts[0].windows.filter(window => pool !== null && window.pool === pool
+  if (!snapshot || !modelId) return [];
+  const slash = modelId.indexOf('/');
+  const providerId = slash > 0 ? modelId.slice(0, slash) : null;
+  const accounts = snapshot.accounts.filter(account => !account.disabled &&
+    (providerId && account.providerId ? account.providerId === providerId : snapshot.accounts.length === 1));
+  if (accounts.length !== 1 || accounts[0].error) return [];
+  const modelName = modelId.slice(slash + 1);
+  const pool = /(?:^|[/:._-])gemini(?:$|[/:._-]|\d)/i.test(modelName) ? 'gemini'
+    : /(?:^|[/:._-])(?:claude|gpt|chatgpt|codex)(?:$|[/:._-]|\d)/i.test(modelName) ? 'claude-gpt' : null;
+  return accounts[0].windows.filter(window => pool !== null && window.pool === pool
     && (window.resetsAt === null || window.resetsAt > now));
 }

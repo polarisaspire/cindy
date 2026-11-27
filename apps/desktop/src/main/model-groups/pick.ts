@@ -22,8 +22,10 @@ export interface ModelGroupCandidateFacts {
   available: boolean;
   modelName: string;
   sourceName: string;
-  /** 订阅额度窗口；读不到(API 密钥、尚未读到)为 null。 */
+  /** 额度窗口；读不到为 null。 */
   windows: readonly ModelGroupTraceQuota[] | null;
+  /** Magpie 网关的上游配额不表示当前连接免费。 */
+  meteredQuota?: boolean;
   /**
    * 「最省钱」用的标价：每百万输出 token 的美元价(人民币报价已折算)。订阅来源、没有标价时为 null。
    * 只在选法是 cheapest 时才读取，其余选法可省略。
@@ -98,10 +100,14 @@ function weightedPick<T extends { key: string; weight: number }>(rows: readonly 
 
 /** 还有配额的订阅不另外花钱；其余按标价，没有标价的排在有标价的后面。 */
 function costOf(fact: ModelGroupCandidateFacts | undefined): number {
-  if (fact?.windows) return 0;
+  if (hasFreeQuota(fact)) return 0;
   return typeof fact?.price === 'number' && Number.isFinite(fact.price) && fact.price >= 0
     ? fact.price
     : Number.POSITIVE_INFINITY;
+}
+
+function hasFreeQuota(fact: ModelGroupCandidateFacts | undefined): boolean {
+  return !!fact?.windows && !fact.meteredQuota;
 }
 
 export function pickModelGroupCandidate(
@@ -182,7 +188,7 @@ export function pickModelGroupCandidate(
     if (why === 'cheapest') {
       const cost = costOf(facts[picked.index]);
       // 谁都没有标价时只是按列表顺序取了第一个，不说它最省钱。
-      why = cost === 0 && facts[picked.index]?.windows ? 'cheapestFree' : Number.isFinite(cost) ? 'cheapest' : 'order';
+      why = cost === 0 && hasFreeQuota(facts[picked.index]) ? 'cheapestFree' : Number.isFinite(cost) ? 'cheapest' : 'order';
     }
   } else if (usable.length > 0) {
     // 全都撞了上限：选最早恢复的那个，任务照常建立，由现有的「等额度恢复后自动继续」接手。

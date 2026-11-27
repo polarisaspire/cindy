@@ -63,8 +63,8 @@ Desktop 本机供应商详情复用 `ProviderAccountUsageModule` 显示 Magpie �
 主进程按账号代次、连接配置和凭证隔离缓存，丢弃已失效的在途结果。
 
 输入框下方的 `TodaySpendChip` 复用同一查询，按当前任务的供应商和引擎取凭证。
-单个上游账号且窗口与当前模型的原生 pool（Gemini / Claude & GPT）匹配时显示剩余比例；
-过期、旧快照、未知模型池或多个上游账号不生成合计百分比，悬浮卡仍可查看各账号窗口并刷新。
+当前模型的上游有且只有一个可用账号、窗口与原生配额池（Gemini / Claude & GPT）匹配时显示剩余比例。
+过期、旧快照、未知模型池或同一来源下多账号的余量视为未知，悬浮卡仍可查看各账号窗口并刷新。
 不新增跨设备协议；手机、远程与分享连接仍沿用各自既有支持范围。
 实现见 `maker-host/magpie-account-usage.ts`、`shared/magpieUsage.ts`，
 回归见 `provider-account-usage.test.ts`、`useProviderAccountUsage.test.ts` 和
