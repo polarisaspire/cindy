@@ -129,6 +129,7 @@ import {
 } from './xdt-helper/teammate_projects.js';
 import { registerRemoteControlRequestTool, registerListMachinesTool, type ListMachinesCallbacks } from './xdt-helper/list_machines.js';
 import { registerTeammateHomeTools, type TeammateHomeCallbacks } from './xdt-helper/teammate_home.js';
+import { registerWorkspaceMigrationTool, type WorkspaceMigrationCallbacks } from './xdt-helper/workspace_migration.js';
 import {
   registerBotCapabilityTools,
   registerAppDefaultModelTools,
@@ -263,7 +264,7 @@ export const HELPER_CATEGORY_DESCRIPTIONS: Record<(typeof CATEGORY_ENUM)[number]
     `本机。`,
   ].join(''),
   bots: [
-    '伙伴：资料、能力、关联项目（list_teammate_projects / set_teammate_project，仅自身）、发现伙伴与主力电脑。',
+    '伙伴：资料、能力、关联项目（list_teammate_projects / set_teammate_project，仅自身）、发现伙伴与主力电脑，以及本机工作区迁移（teammate_workspace_migration）。',
     '自动接管本机全部任务的跟进：get_teammate_follow_up / set_teammate_follow_up，复用伙伴项目自动化，可开启或暂停。',
     '指定任务交给伙伴负责：get_task_responsibility / set_task_responsibility，真实保存负责关系并通知后续状态；旧 set_workbench_task_responsibility 接口兼容。登记不会开启已暂停的全局巡查。',
     '发现伙伴（list_agents，返回伙伴主对话的 session_id，发消息用 handoff 类的 send_to_session）与主力电脑（get_teammate_home / move_teammate_home）可跨电脑；',
@@ -585,6 +586,7 @@ export interface XdtHelperMcpDeps {
   botCapabilities?: BotCapabilityCallbacks;
   /** Which computer runs a teammate, and moving it to another (cloud companions). */
   teammateHome?: TeammateHomeCallbacks;
+  workspaceMigration?: WorkspaceMigrationCallbacks;
   /** What machines this account has and their live resources. */
   machines?: ListMachinesCallbacks;
   /**
@@ -668,7 +670,7 @@ export function createXdtHelperMcpServer(
     }
     const allow = (categories: ReadonlySet<string>): HelperSurfaceAllow => ({
       categories,
-      ...(sessionId && !remoteBotOnly ? { tools: new Set(['list_agents']) } : {}),
+      ...(sessionId && !remoteBotOnly ? { tools: new Set(['list_agents', ...(!context.remoteHostId ? ['teammate_workspace_migration'] : [])]) } : {}),
     });
     if (!sessionId) return allow(remoteBotOnly ? new Set() : defaultCategories);
     if (!deps.resolveSurface) return allow(remoteBotOnly ? new Set(['auth', 'cindy']) : defaultCategories);
@@ -894,6 +896,9 @@ export function createXdtHelperMcpServer(
       callbacks: deps.teammateHome,
     });
   }
+  if (deps.workspaceMigration) registerWorkspaceMigrationTool(registry, {
+    getSessionContext: () => resolveLiziMcpSessionContext(sessionCtx), callbacks: deps.workspaceMigration,
+  });
   if (deps.modelSettings) registerAppModelsTools(registry, deps.modelSettings, () => resolveLiziMcpSessionContext(sessionCtx));
   if (deps.providerReads) registerProviderReadTools(registry, deps.providerReads, () => resolveLiziMcpSessionContext(sessionCtx));
   if (deps.providerSharing) registerProviderSharingTools(registry, deps.providerSharing, () => resolveLiziMcpSessionContext(sessionCtx));
