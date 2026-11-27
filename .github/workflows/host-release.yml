@@ -99,6 +99,8 @@ jobs:
 
       # The builder copies these from the checkout and from Playwright's cache; it downloads nothing.
       - name: Install agent runtimes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/ensure-agent-binaries.mjs --kinds=claude,codex,ripgrep,pi --platform=current
 
       - name: Install Chromium
