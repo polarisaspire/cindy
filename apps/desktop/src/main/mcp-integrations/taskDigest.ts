@@ -15,6 +15,7 @@ type Failure = { ok: false; errorCode: 'NOT_FOUND' | 'REMOTE_UNAVAILABLE' | 'INV
 
 export interface TaskDigestSessionFacts {
   followerBotId?: string | null;
+  pinned?: boolean;
   title: string;
   status: string;
   route: TaskDigestRoute | null;
@@ -55,6 +56,7 @@ export interface TaskDigestDeps {
     readLastExchange(sessionId: string): Promise<TaskDigestExchange>;
     readError?(sessionId: string, activity: TaskDigestActivity | null, facts: TaskDigestSessionFacts): Promise<string | null>;
     queuedCount(sessionId: string): Promise<number | null>;
+    queuePaused?(sessionId: string): boolean | undefined;
     prStatus(sessionId: string): Promise<string | null>;
     /**
      * 出错 / 撞上用量上限时,调用方伙伴候选链里下一条可用路线(跳过当前与已试过的)。
@@ -254,6 +256,7 @@ export function createTaskDigestReader(deps: TaskDigestDeps) {
       ok: true,
       digest: assemble({
         key, now, watched, facts, activity, exchange, prStatus, queuedCount, suggestedRoute, error,
+        queuePaused: facts.shared ? undefined : deps.local.queuePaused?.(key),
         local: true,
         device: null,
         runtimeGeneration: activity?.runtimeGeneration ?? null,
@@ -272,6 +275,7 @@ function assemble(input: {
   exchange: TaskDigestExchange;
   prStatus: string | null;
   queuedCount: number | null;
+  queuePaused?: boolean;
   suggestedRoute: TaskDigestRoute | null;
   runtimeGeneration: number | null;
   /** 本机任务;另一台电脑上的任务为 false。 */
@@ -289,6 +293,7 @@ function assemble(input: {
   return {
     session_id: input.key,
     device: input.device,
+    ...(input.facts.pinned !== undefined && { pinned: input.facts.pinned }),
     title: watched?.title || input.facts.title,
     phase,
     elapsed_minutes: minutesSince(input.now, since),
@@ -303,6 +308,7 @@ function assemble(input: {
     suggested_route: input.suggestedRoute,
     pr_status: input.prStatus,
     queued_count: input.queuedCount,
+    ...(input.queuePaused === undefined ? {} : { queue_paused: input.queuePaused }),
     follower_bot_id: input.facts.followerBotId !== undefined ? input.facts.followerBotId : watched?.followerBotId ?? null,
     creator_bot_id: watched?.creatorBotId ?? null,
     ...(toolInFlight === undefined ? {} : { tool_in_flight: toolInFlight }),
@@ -340,6 +346,7 @@ export function sessionFactsFromRow(row: unknown): TaskDigestSessionFacts | null
   const clearedAt = typeof record.clearedAt === 'number' ? record.clearedAt
     : typeof record.clearedAt === 'string' ? Date.parse(record.clearedAt) : NaN;
   return {
+    ...(record.pinnedAt !== undefined && { pinned: record.pinnedAt !== null }),
     title: text(record.title) ?? '',
     status: text(record.status) ?? 'active',
     ...(Number.isFinite(clearedAt) ? { clearedAt } : {}),

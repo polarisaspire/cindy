@@ -3,9 +3,10 @@ import { desktopMakerLogger } from '../maker-host/logger-adapter.js';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { codexWorkspaceIdFromTokens } from '../maker-host/codex-auth-identity.js';
 import { open } from 'node:fs/promises';
 import { statSync, type Stats } from 'node:fs';
-import { cleanProcessEnv, type AuthState } from '@cindy/maker-core';
+import { cleanProcessEnv, type AccountRateLimitsResponse, type AuthState } from '@cindy/maker-core';
 import { getReadyBinaryPath } from '../agent-binaries/index.js';
 import {
   refreshClaudeCliLoginStatus,
@@ -113,7 +114,11 @@ export async function readNativeAccount(
       ...(result.loginExpiresAt ? { loginExpiresAt: result.loginExpiresAt } : {}),
     };
   }
-  const result = (await codexAccountRpc(directory, 'account/read', { refreshToken: false }, options?.codexCanDispatch)) as {
+  return parseNativeCodexAccount(await codexAccountRpc(directory, 'account/read', { refreshToken: false }, options?.codexCanDispatch));
+}
+
+function parseNativeCodexAccount(value: unknown): AuthState & { plan?: string; planType?: string } {
+  const result = value as {
     account?: { type?: string; email?: string; planType?: string } | null;
     requiresOpenaiAuth?: boolean;
   };
@@ -128,6 +133,37 @@ export async function readNativeAccount(
     ...(result.account === null && result.requiresOpenaiAuth === false
       ? { errorReason: 'codex_provider_managed_auth' }
       : {}),
+  };
+}
+
+/** The initial identity and quota can share startup while the selected credential stays current. */
+export async function readNativeCodexAccountAndRateLimits(
+  directory: string,
+  assertCurrent: () => void | Promise<void>,
+) {
+  await assertCurrent();
+  const tokens = await readNativeCodexTokens(directory);
+  const checkCredential = () => {
+    if (!tokens.canDispatch()) throw new Error('PRECONDITION_FAILED: ChatGPT account changed');
+  };
+  const canDispatch = async () => {
+    await assertCurrent();
+    return true;
+  };
+  const [account, response] = await runCodexAccountRpc(directory, [
+    { method: 'account/read', params: { refreshToken: false } },
+    { method: 'account/rateLimits/read', params: {}, checkPrevious: previous => {
+      const auth = parseNativeCodexAccount(previous);
+      if (!auth.authenticated || !auth.identity)
+        throw new Error('PRECONDITION_FAILED: ChatGPT account changed');
+    } },
+  ], { canDispatch, checkCredential });
+  await assertCurrent();
+  checkCredential();
+  const auth = parseNativeCodexAccount(account);
+  return {
+    identity: { email: auth.identity ?? null, accountId: tokens.chatgptAccountId },
+    response: response as AccountRateLimitsResponse,
   };
 }
 
@@ -183,6 +219,17 @@ async function readNativeCodexCredentials(directory: string, refresh = false) {
       if (codexRefreshes.get(directory) === pending) codexRefreshes.delete(directory);
     }
   }
+  const tokens = await readCodexTokenFile(directory, false);
+  if (!tokens.accessToken || tokens.chatgptAccountId === null) throw new Error('Codex account authentication bridge is unavailable');
+  return { ...tokens, accessToken: tokens.accessToken, chatgptAccountId: tokens.chatgptAccountId };
+}
+
+/** WHAM can read usage without a workspace header; the external-auth bridge requires one. */
+export function readCodexWebTokens(directory: string) {
+  return readCodexTokenFile(directory, true);
+}
+
+async function readCodexTokenFile(directory: string, webUsage: boolean) {
   const authPath = path.join(directory, 'auth.json');
   const file = await open(authPath, 'r');
   const sameFile = (a: Stats, b: Stats) =>
@@ -205,17 +252,20 @@ async function readNativeCodexCredentials(directory: string, refresh = false) {
         return false;
       }
     };
-    if (
-      !sameFile(before, after) ||
-      !canDispatch() ||
-      typeof raw.tokens?.access_token !== 'string' ||
-      typeof raw.tokens?.account_id !== 'string'
-    )
+    if (!sameFile(before, after) || !canDispatch())
+      throw new Error('Codex account authentication bridge is unavailable');
+    const hasApiKey = typeof raw.OPENAI_API_KEY === 'string' && raw.OPENAI_API_KEY.trim().length > 0;
+    if (webUsage && (raw.auth_mode === 'apikey' || (raw.auth_mode == null && hasApiKey && !raw.tokens?.access_token))) {
+      if (!hasApiKey) throw new Error('Codex account authentication bridge is unavailable');
+      return { accessToken: null, chatgptAccountId: null, canDispatch };
+    }
+    if (typeof raw.tokens?.access_token !== 'string' || !raw.tokens.access_token)
       throw new Error('Codex account authentication bridge is unavailable');
     return {
       accessToken: raw.tokens.access_token as string,
-      chatgptAccountId: raw.tokens.account_id as string,
-      email: parseCodexAccountIdentity(rawText)?.label ?? null,
+      chatgptAccountId: webUsage ? codexWorkspaceIdFromTokens(raw.tokens)
+        : typeof raw.tokens.account_id === 'string' ? raw.tokens.account_id as string : null,
+      email: webUsage ? null : parseCodexAccountIdentity(rawText)?.label ?? null,
       canDispatch,
     };
   } finally {
@@ -243,6 +293,19 @@ export function codexAccountRpc(
   canDispatch?: () => boolean | Promise<boolean>,
   refreshId?: string,
 ): Promise<unknown> {
+  return runCodexAccountRpc(directory, [{ method, params }], { canDispatch, refreshId })
+    .then(([result]) => result);
+}
+
+function runCodexAccountRpc(
+  directory: string,
+  requests: ReadonlyArray<{ method: string; params: unknown; checkPrevious?: (result: unknown) => void }>,
+  { canDispatch, refreshId, checkCredential }: {
+    canDispatch?: () => boolean | Promise<boolean>;
+    refreshId?: string;
+    checkCredential?: () => void;
+  },
+): Promise<unknown[]> {
   const binary = getReadyBinaryPath('codex');
   if (!binary) return Promise.reject(new Error('Codex CLI unavailable'));
   return new Promise((resolve, reject) => {
@@ -257,19 +320,25 @@ export function codexAccountRpc(
     let settled = false;
     let buffer = '';
     let renewedQuotaRead = false;
-    const finish = (error?: Error, result?: unknown) => {
+    const results: unknown[] = [];
+    let expectedId: number | undefined = 1;
+    const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.kill();
       if (error) reject(error);
-      else resolve(result);
+      else resolve(results);
     };
     // A stalled read is almost always the CLI waiting on its account service (startup refreshes).
-    const timer = setTimeout(() => finish(new AccountServiceUnreachableError('Codex account read timed out')), 15_000);
+    const startTimeout = () => setTimeout(
+      () => finish(new AccountServiceUnreachableError('Codex account read timed out')), 15_000);
+    let timer = startTimeout();
     const send = (message: unknown) => child.stdin.write(JSON.stringify(message) + '\n');
     const dispatch = async () => {
       try {
+        const request = requests[results.length];
+        request.checkPrevious?.(results.at(-1));
         if (canDispatch) {
           const allowed = canDispatch();
           // Existing synchronous proofs and the write must stay in the same synchronous segment.
@@ -277,7 +346,12 @@ export function codexAccountRpc(
             return finish(new Error('Codex account changed before dispatch'));
         }
         // An asynchronous credential/source check can outlive this control connection.
-        if (!settled) send({ id: 2, method, params });
+        if (!settled) {
+          // Check the file again synchronously after an asynchronous owner/source check.
+          checkCredential?.();
+          expectedId = renewedQuotaRead ? 4 : results.length + 2;
+          send({ id: expectedId, method: request.method, params: request.params });
+        }
       } catch {
         finish(new Error('Codex account changed before dispatch'));
       }
@@ -298,16 +372,20 @@ export function codexAccountRpc(
         } catch {
           continue;
         }
+        if (expectedId === undefined || message.id !== expectedId) continue;
+        expectedId = undefined;
         if (message.error) {
           const reason = typeof message.error === 'object' && message.error !== null
             ? (message.error as { message?: unknown }).message : undefined;
-          // Preserve the existing account-control renewal: only a correlated,
-          // read-only quota request may retry after the CLI renews OAuth itself.
-          if (message.id === 2 && method === 'account/rateLimits/read' && !renewedQuotaRead
+          // The legacy standalone quota read can renew through Codex. A multi-request
+          // probe pins its credential for the entire connection and cannot renew it.
+          if (message.id === 2 && requests.length === 1 && !checkCredential && !canDispatch
+            && requests[0].method === 'account/rateLimits/read' && !renewedQuotaRead
             && typeof reason === 'string' && /\b401\b/.test(reason) && /\btoken_expired\b/.test(reason)
             && !/token_revoked|token_invalidated|refresh_token_reused/.test(reason)) {
             renewedQuotaRead = true;
-            send({ id: 3, method: 'account/read', params: { refreshToken: true } });
+            expectedId = 3;
+            send({ id: expectedId, method: 'account/read', params: { refreshToken: true } });
             continue;
           }
           return finish(codexRequestError(message.error));
@@ -317,8 +395,17 @@ export function codexAccountRpc(
           // Startup may await configuration/auth refresh. A reset must still use
           // the exact credential observed before spawning this control connection.
           void dispatch();
-        } else if (message.id === 3 && renewedQuotaRead) void dispatch();
-        else if (message.id === 2) finish(undefined, message.result);
+        } else if (renewedQuotaRead && message.id === 3) {
+          void dispatch();
+        } else {
+          results.push(message.result);
+          if (results.length === requests.length) finish();
+          else {
+            clearTimeout(timer);
+            timer = startTimeout();
+            void dispatch();
+          }
+        }
       }
     });
     send({
