@@ -2,6 +2,7 @@ import type { AgentKind, EngineKind } from '@cindy/maker-core';
 import { normalizeOrcaWorkerLabel, normalizeOrcaWorkerRole } from '@cindy/maker-shared/orca-team';
 
 import type { AgentInputQueuedMessage } from '../../shared/agentInputQueue.js';
+import { verifiedOwnerRequestText, type AgentRequestReceipt } from '../../shared/forwardedRequest.js';
 import { createHostSendFailure } from '../maker-host/send-outcome.js';
 import type {
   CollabDispatchFailureOutcome,
@@ -118,6 +119,8 @@ export type DispatchWorkerMessageResult =
 export interface DispatchWorkerTaskParams {
   targetSessionId: string;
   message: string;
+  /** Host-only: trusted Desktop UI owner-authored task text (never accepted from wire/MCP args). */
+  ownerAuthoredText?: string;
   /** 可选, 随首条任务发给 worker 的本机图片绝对路径; 仅本机 worker。 */
   imagePaths?: string[];
   dispatchMeta: {
@@ -472,10 +475,18 @@ export interface OrcaTeamServiceDeps {
   broadcastOrcaWorkerChanged(leadSessionId: string): void;
   /** The Lead's last outstanding worker report was delivered or discarded. */
   onLeadWorkerReportsSettled?(leadSessionId: string): void;
+  /** Host-captured owner request receipt when Lead edits or merges queued Worker messages. */
+  captureLeadRequest?(
+    leadSessionId: string,
+    message: string,
+    targetSessionId: string,
+  ): Promise<AgentRequestReceipt>;
   dispatchWorkerMessage(params: {
     targetSessionId: string;
     message: string;
     workerId: string;
+    /** Host-only: trusted Desktop UI owner-authored task text. */
+    ownerAuthoredText?: string;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
     dispatchMeta: {
@@ -555,7 +566,10 @@ export interface OrcaTeamService {
     callerLeadSessionId: string;
     targetSessionId: string;
     message: string;
+    /** Host-only: trusted Desktop UI owner-authored task text. */
+    ownerAuthoredText?: string;
     delivery?: 'queue' | 'steer';
+    imagePaths?: string[];
   }, assertCurrent?: () => Promise<void>): Promise<SendToWorkerResult>;
   /** Sole public entry for replacing the active worker turn. */
   interruptWorker(params: {
@@ -1207,6 +1221,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       resolved: { worker: target, link },
       message: params.message,
       mode: 'normal',
+      ...(params.ownerAuthoredText ? { ownerAuthoredText: params.ownerAuthoredText } : {}),
       ...(params.imagePaths ? { imagePaths: params.imagePaths } : {}),
       dispatchMeta: params.dispatchMeta,
       assertCurrent,
@@ -1269,6 +1284,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     resolved: ResolvedWorker;
     message: string;
     mode: 'normal' | 'interrupt';
+    ownerAuthoredText?: string;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
     dispatchMeta: DispatchWorkerTaskParams['dispatchMeta'];
@@ -1416,6 +1432,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
             targetSessionId: target.sessionId,
             message: params.message,
             workerId: link.workerId,
+            ...(params.ownerAuthoredText ? { ownerAuthoredText: params.ownerAuthoredText } : {}),
             ...(params.delivery ? { delivery: params.delivery } : {}),
             ...(params.imagePaths ? { imagePaths: params.imagePaths } : {}),
             dispatchMeta: params.dispatchMeta,
@@ -1499,6 +1516,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     callerLeadSessionId: string;
     targetSessionId: string;
     message: string;
+    ownerAuthoredText?: string;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
   }, assertCurrent?: () => Promise<void>): Promise<SendToWorkerResult> {
@@ -1519,6 +1537,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     targetSessionId: string;
     message: string;
     mode: 'normal' | 'interrupt';
+    ownerAuthoredText?: string;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
   }, captured?: () => Promise<void>): Promise<SendToWorkerResult | InterruptWorkerResult> {
@@ -1560,6 +1579,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       resolved,
       message: params.message,
       mode: params.mode,
+      ...(params.ownerAuthoredText ? { ownerAuthoredText: params.ownerAuthoredText } : {}),
       ...(params.delivery ? { delivery: params.delivery } : {}),
       ...(params.imagePaths ? { imagePaths: params.imagePaths } : {}),
       assertCurrent,
@@ -2051,6 +2071,14 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
           }
         : { ok: false, errorCode: 'INTERNAL', message: found.message };
     }
+    const captured = await deps.captureLeadRequest?.(
+      params.callerLeadSessionId,
+      params.message,
+      found.worker.sessionId,
+    );
+    const refreshedReceipt: AgentRequestReceipt = verifiedOwnerRequestText(captured) !== undefined
+      ? { kind: 'delegated-continuation', request: captured!.request }
+      : { kind: 'delegated-continuation' };
     const controlled = await queueControl.update({
       beforeMutation: assertCurrent,
       sessionId: found.worker.sessionId,
@@ -2063,7 +2091,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
               ok: false,
               message: `queued message ${params.queuedMessageId} was not sent by the lead; user/scheduler queued messages cannot be modified`,
             },
-      rebuild: (entry, message) => rebuildQueuedOrcaLeadMessage(entry, message, found.worker.id),
+      rebuild: (entry, message) => rebuildQueuedOrcaLeadMessage(entry, message, found.worker.id, refreshedReceipt),
     });
     if (!controlled.ok) return mapWorkerQueueControlFailure(controlled);
     deps.log.info('orca lead updated queued worker message', {
@@ -2153,6 +2181,14 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       };
     }
     await assertCurrent?.();
+    const captured = await deps.captureLeadRequest?.(
+      params.callerLeadSessionId,
+      params.message,
+      found.worker.sessionId,
+    );
+    const refreshedReceipt: AgentRequestReceipt = verifiedOwnerRequestText(captured) !== undefined
+      ? { kind: 'delegated-continuation', request: captured!.request }
+      : { kind: 'delegated-continuation' };
     const merged = deps.mergeQueuedMessages(
       found.worker.sessionId,
       params.queuedMessageIds,
@@ -2172,6 +2208,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
           mergedFiles.length > 0 ? { ...survivor, files: mergedFiles } : survivor,
           params.message,
           found.worker.id,
+          refreshedReceipt,
         );
       },
     );

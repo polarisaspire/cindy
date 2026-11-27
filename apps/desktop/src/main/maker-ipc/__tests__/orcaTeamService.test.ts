@@ -4496,3 +4496,87 @@ describe('Orca delivery scope', () => {
     expect(evaluate({ row: null })).toBe('task-gone');
   });
 });
+
+// Unit regression for teammate-authority.md「转达主人原话」: editing or merging queued
+// Orca Lead messages must re-capture owner request evidence for the new text and strip
+// stale delegatedText when the current turn is unverified.
+describe('Orca queued Lead message receipt re-capture', () => {
+  const leadQueued = (clientId: string, text: string, delegatedText?: string): AgentInputQueuedMessage => ({
+    clientId,
+    text: `[From Orca Lead]\n${text}`,
+    persistedContent: `{"orcaSource":"lead","content":${JSON.stringify(text)}}`,
+    autoReviewUserText: delegatedText
+      ? { kind: 'delegated-continuation', request: { sessionId: 'lead-1', clientId: 'u1', plainBody: true, delegatedText } }
+      : { kind: 'delegated-continuation' },
+    model: 'claude-sonnet-5-5',
+    effort: '',
+    permissionMode: 'auto',
+    workingDir: '/repo',
+    chatMessage: { clientId, role: 'user', content: `{"orcaSource":"lead","content":${JSON.stringify(text)}}`, createdAt: '2026-11-27T00:00:00.000Z' },
+    createOpts: { agentKind: 'claude-code', workingDir: '/repo', model: 'claude-sonnet-5-5', permissionMode: 'auto' },
+    origin: { kind: 'orca', senderLabel: 'Lead', displayText: text },
+  });
+
+  it('re-captures verified receipt on updateWorkerQueuedMessage and strips stale receipt when unverified', async () => {
+    const queue = [leadQueued('q1', 'Old task', 'Old task')];
+    const refreshed = {
+      kind: 'delegated-continuation' as const,
+      request: { sessionId: 'lead-1', clientId: 'u2', plainBody: true as const, delegatedText: 'Updated task' },
+    };
+    const captureLeadRequest = vi.fn<NonNullable<OrcaTeamServiceDeps['captureLeadRequest']>>(async () => refreshed);
+    const { service } = createDeps({
+      captureLeadRequest,
+      getSessionQueueSnapshot: vi.fn(async () => ({
+        pendingQueue: [...queue], steeringClientIds: [], consumingClientIds: [],
+        isWorking: true, willQueue: true, queuePaused: false,
+      })),
+      replaceQueuedMessage: vi.fn((_sid, _cid, next) => { queue[0] = next; return true; }),
+    });
+
+    const updated = await service.updateWorkerQueuedMessage({
+      callerLeadSessionId: 'lead-1', workerRef: 'worker-1', queuedMessageId: 'q1', message: 'Updated task',
+    });
+    expect(updated).toMatchObject({ ok: true });
+    expect(captureLeadRequest).toHaveBeenCalledWith('lead-1', 'Updated task', 'worker-session-1');
+    expect(queue[0]?.autoReviewUserText).toEqual(refreshed);
+
+    // Unverified turn must strip the old receipt rather than leaving stale delegatedText.
+    captureLeadRequest.mockResolvedValueOnce({ kind: 'delegated-continuation' });
+    await service.updateWorkerQueuedMessage({
+      callerLeadSessionId: 'lead-1', workerRef: 'worker-1', queuedMessageId: 'q1', message: 'Unverified edit',
+    });
+    expect(queue[0]?.autoReviewUserText).toEqual({ kind: 'delegated-continuation' });
+  });
+
+  it('re-captures verified receipt on mergeWorkerQueuedMessages', async () => {
+    const queue = [leadQueued('q1', 'Step 1', 'Step 1'), leadQueued('q2', 'Step 2', 'Step 2')];
+    const refreshed = {
+      kind: 'delegated-continuation' as const,
+      request: { sessionId: 'lead-1', clientId: 'u2', plainBody: true as const, delegatedText: 'Merged step' },
+    };
+    const captureLeadRequest = vi.fn(async () => refreshed);
+    const replaced: AgentInputQueuedMessage[] = [];
+    const { service } = createDeps({
+      captureLeadRequest,
+      ensureWorkerQueueRestored: vi.fn(async () => true),
+      getSessionQueueSnapshot: vi.fn(async () => ({
+        pendingQueue: replaced.length > 0 ? [...replaced] : [...queue], steeringClientIds: [], consumingClientIds: [],
+        isWorking: true, willQueue: true, queuePaused: false,
+      })),
+      mergeQueuedMessages: vi.fn((_sid, _ids, build) => {
+        const next = build(queue);
+        if (!next) return false;
+        replaced.splice(0, replaced.length, next);
+        return true;
+      }),
+    });
+
+    const merged = await service.mergeWorkerQueuedMessages({
+      callerLeadSessionId: 'lead-1', workerRef: 'worker-1', queuedMessageIds: ['q1', 'q2'], message: 'Merged step',
+    });
+    expect(merged).toMatchObject({ ok: true });
+    expect(captureLeadRequest).toHaveBeenCalledWith('lead-1', 'Merged step', 'worker-session-1');
+    expect(replaced[0]?.autoReviewUserText).toEqual(refreshed);
+  });
+});
+

@@ -13,6 +13,8 @@ export type OrcaWorkerCreateRequest = Omit<OrcaWorkerCreateParams, 'agent'> & {
   agent?: EngineKind;
   /** Host-only: MCP creation opts in; manual UI and enableTeam retain their own choices. */
   useCreationPrefs?: boolean;
+  /** Host-only: trusted Desktop UI IPC stamped owner-authored initialTask. */
+  ownerAuthoredInitialTask?: true;
 };
 export interface WorkerDefaultsResolution {
   source: 'memory' | 'original-policy' | 'explicit';

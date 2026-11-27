@@ -1206,3 +1206,64 @@ describe('Orca task authority is independent of task creator', () => {
     await expect(authority.assertCurrent()).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 });
+
+// Unit regression: Desktop UI Worker creation with an explicit owner-typed initialTask
+// must propagate ownerAuthoredInitialTask so Auto-review does not block UI-created auto Workers.
+describe('OrcaLifecycleService owner-authored UI initialTask', () => {
+  it('forwards ownerAuthoredInitialTask on createWorker and enableTeam when set by trusted UI IPC', async () => {
+    const { deps, service } = createDeps({
+      getActiveTeamByLead: vi.fn(async () => activeTeam()),
+    });
+    await service.createWorker({
+      leadSessionId: 'lead-1',
+      agent: 'claude-code',
+      role: 'developer',
+      label: 'dev-1',
+      initialTask: 'Run tests and fix failures',
+      ownerAuthoredInitialTask: true,
+    });
+    expect(deps.dispatchWorkerTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetSessionId: 'worker-session-1',
+        message: 'Run tests and fix failures',
+        ownerAuthoredText: 'Run tests and fix failures',
+      }),
+      undefined,
+    );
+
+    vi.mocked(deps.dispatchWorkerTask).mockClear();
+    vi.mocked(deps.getActiveTeamByLead).mockResolvedValueOnce(null);
+    await service.enableTeam({
+      leadSessionId: 'lead-1',
+      workerAgent: 'claude-code',
+      role: 'developer',
+      label: 'dev-2',
+      delegateTask: 'Verify Unity PlayMode',
+      ownerAuthoredInitialTask: true,
+    });
+    expect(deps.dispatchWorkerTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetSessionId: 'worker-session-1',
+        message: expect.stringContaining('Verify Unity PlayMode'),
+        ownerAuthoredText: 'Verify Unity PlayMode',
+      }),
+      undefined,
+    );
+  });
+
+  it('does not attach ownerAuthoredText when ownerAuthoredInitialTask is absent (MCP path)', async () => {
+    const { deps, service } = createDeps({
+      getActiveTeamByLead: vi.fn(async () => activeTeam()),
+    });
+    await service.createWorker({
+      leadSessionId: 'lead-1',
+      agent: 'claude-code',
+      role: 'developer',
+      label: 'dev-mcp',
+      initialTask: 'Run tests from MCP Lead',
+    });
+    const call = vi.mocked(deps.dispatchWorkerTask).mock.calls[0]?.[0];
+    expect(call).not.toHaveProperty('ownerAuthoredText');
+  });
+});
+
