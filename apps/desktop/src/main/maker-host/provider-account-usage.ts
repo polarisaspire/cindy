@@ -19,7 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { canReadMagpieUsage, hasMagpieModels, magpieQuotaEndpoint, parseMagpieQuota } from '../../shared/magpieUsage.js';
+import { canReadMagpieUsage, parseMagpieQuota } from '../../shared/magpieUsage.js';
 import { readMagpieAccountUsage, resetMagpieAccountUsage } from './magpie-account-usage.js';
 
 import type { AgentKind, Provider } from '@cindy/model-providers';
@@ -762,24 +762,21 @@ function callMagpieAccountUsage(
   });
 }
 
-/** Select a local Magpie gateway route with discovered Magpie models, never probing arbitrary API keys. */
+/**
+ * Read Magpie gateway quota for a user API-key connection, skipping official integrations.
+ * Does not require in-memory `discoveredSource` tags because `projectCurrentModelSources`
+ * clears persisted discovery provenance on every restart; `readMagpieAccountUsage` caches
+ * both ready and unsupported results for 5 minutes and shares the slot with Settings/Composer.
+ */
 export async function readMagpieProviderAccountUsage(request: ProviderAccountUsageRequest): Promise<ProviderAccountUsageResult> {
   const provider = providerReader(request.providerId);
-  if (!canReadMagpieUsage(provider)) return { status: 'unsupported' };
-  const agents = request.agent ? [request.agent] : PROVIDER_ACCOUNT_USAGE_AGENTS;
-  let matched = false;
-  for (const agent of agents) {
-    if (!hasMagpieModels(provider, agent)) continue;
-    const route = provider?.routing[agent];
-    if (!route || route.disabled || !magpieQuotaEndpoint(route.upstream)) continue;
-    matched = true;
-    if (!keyReader(request.providerId, agent)?.trim()) continue;
-    const ownerStamp = ownerStampReader();
-    const epoch = kimiMutationEpoch;
-    const config = JSON.stringify(provider);
-    const ownerCurrent = () => JSON.stringify(ownerStampReader()) === JSON.stringify(ownerStamp)
-      && JSON.stringify(providerReader(request.providerId)) === config;
-    return callMagpieAccountUsage({ ...request, agent }, provider, ownerStamp, epoch, ownerCurrent);
+  if (!canReadMagpieUsage(provider) || providerAccountUsageSupported(request.providerId)) {
+    return { status: 'unsupported' };
   }
-  return matched ? { status: 'unavailable', integration: 'magpie', error: 'no-credentials' } : { status: 'unsupported' };
+  const ownerStamp = ownerStampReader();
+  const epoch = kimiMutationEpoch;
+  const config = JSON.stringify(provider);
+  const ownerCurrent = () => JSON.stringify(ownerStampReader()) === JSON.stringify(ownerStamp)
+    && JSON.stringify(providerReader(request.providerId)) === config;
+  return callMagpieAccountUsage(request, provider, ownerStamp, epoch, ownerCurrent);
 }

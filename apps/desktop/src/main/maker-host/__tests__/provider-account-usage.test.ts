@@ -509,41 +509,41 @@ describe('readProviderAccountUsage', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  // Unit: quota panel Magpie reads must only touch routes with discovered Magpie models,
-  // never probe arbitrary API key connections, and share the cache/in-flight slot with settings.
-  it('reads only discovered Magpie routes and shares cache with settings', async () => {
-    setAccountUsageProviderReader(id => id === 'plain'
-      ? mkProvider({ id, routing: { pi: { upstream: 'https://plain.test/v1', authStrategy: 'api-key-header' } } })
-      : mkProvider({
-          id,
-          routing: {
-            'claude-code': { upstream: 'https://other.test/v1', authStrategy: 'api-key-header' },
-            pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' },
-          },
-          models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null, discoveredSource: { kind: 'magpie', providerId: 'agy-cli' } }] },
-        }));
-    const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonRes({
-      object: 'list',
-      data: [{ readAt: '2026-11-26T03:00:00Z', windows: [{ name: 'Gemini · 7 days', remaining: 64 }] }],
-    }));
+  // Unit: quota panel Magpie reads must work after restart when `projectCurrentModelSources`
+  // clears `discoveredSource`, never probe official integrations (e.g. DeepSeek), cache unsupported
+  // third-party endpoints, and share the cache slot with Settings/Composer.
+  it('reads Magpie quota after restart without discoveredSource, skips official routes, and shares cache with settings', async () => {
+    setAccountUsageProviderReader(id => id === 'official-deepseek'
+      ? mkProvider({ id, routing: { pi: { upstream: 'https://api.deepseek.com/v1', authStrategy: 'api-key-header' } } })
+      : id === 'plain'
+        ? mkProvider({ id, routing: { pi: { upstream: 'https://plain.test/v1', authStrategy: 'api-key-header' } } })
+        : mkProvider({
+            id,
+            routing: { pi: { upstream: 'https://gateway.test/v1', authStrategy: 'api-key-header' } },
+            // No discoveredSource: simulates catalog state right after restart.
+            models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null }] },
+          }));
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => String(input).includes('gateway.test')
+      ? jsonRes({
+          object: 'list',
+          data: [{ readAt: '2026-11-26T03:00:00Z', windows: [{ name: 'Gemini · 7 days', remaining: 64 }] }],
+        })
+      : jsonRes({ error: 'not found' }, 404));
     setAccountUsageFetch(fetch);
 
+    await expect(readMagpieProviderAccountUsage({ providerId: 'official-deepseek' })).resolves.toEqual({ status: 'unsupported' });
+    expect(fetch).not.toHaveBeenCalled();
+
     await expect(readMagpieProviderAccountUsage({ providerId: 'plain' })).resolves.toEqual({ status: 'unsupported' });
-    expect(fetch).not.toHaveBeenCalled();
+    await expect(readMagpieProviderAccountUsage({ providerId: 'plain' })).resolves.toEqual({ status: 'unsupported' });
+    expect(fetch).toHaveBeenCalledTimes(1);
 
-    setAccountUsageKeyReader(() => null);
-    await expect(readMagpieProviderAccountUsage({ providerId: 'mixed' })).resolves.toEqual({
-      status: 'unavailable', integration: 'magpie', error: 'no-credentials',
-    });
-    expect(fetch).not.toHaveBeenCalled();
-
-    setAccountUsageKeyReader((_id, agent) => agent === 'pi' ? 'fake-magpie-key' : 'fake-other-key');
-    const panel = await readMagpieProviderAccountUsage({ providerId: 'mixed' });
+    const panel = await readMagpieProviderAccountUsage({ providerId: 'magpie-restarted' });
     expect(panel).toMatchObject({ status: 'ready', integration: 'magpie', agent: 'pi' });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledWith('https://gateway.test/v1/magpie/quotas', expect.anything());
-    await expect(readProviderAccountUsage({ providerId: 'mixed', agent: 'pi' })).resolves.toEqual(panel);
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenLastCalledWith('https://gateway.test/v1/magpie/quotas', expect.anything());
+    await expect(readProviderAccountUsage({ providerId: 'magpie-restarted', agent: 'pi' })).resolves.toEqual(panel);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('returns unsupported when no official route exists', async () => {

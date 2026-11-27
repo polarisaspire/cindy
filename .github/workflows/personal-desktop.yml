@@ -177,6 +177,11 @@ jobs:
             src/main/__tests__/updateAutoRelaunchPolicy.test.ts \
             src/main/__tests__/updateVersionPolicy.test.ts
 
+      - name: Ensure pinned ripgrep
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ensure-agent-binaries.mjs --kinds=ripgrep --platform=current
+
       - name: Build Windows installer with packaged smoke
         if: runner.os == 'Windows'
         run: pnpm release:package --platform win32 --arch x64 --region global --version "$PERSONAL_VERSION" --no-sign

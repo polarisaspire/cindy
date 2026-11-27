@@ -3,7 +3,7 @@ import { isZhipuCodingPlanRoute, type ProviderAccountUsageResult } from '../../s
 import { formatClaudeSubscriptionPlanLabel, formatCodexPlanLabel } from '@cindy/maker-shared/subscription-usage';
 import { codexAccountDisplayKey } from '../maker-host/codex-auth-identity.js';
 import { kimiUsageWindowMinutes } from '../../shared/kimiCodingUsage.js';
-import { canReadMagpieUsage, hasMagpieModels } from '../../shared/magpieUsage.js';
+import { canReadMagpieUsage } from '../../shared/magpieUsage.js';
 import { opencodeGoUsageWindowMinutes } from '../../shared/opencodeGoUsage.js';
 /**
  * Turns Cindy's existing usage readers into the menu bar builder's inputs.
@@ -194,10 +194,12 @@ export async function collectMenubarInputs(deps: MenubarCollectDeps): Promise<Me
       const result = await safe(`zhipu:${provider.id}`, () => deps.readZhipu!(provider.id), null);
       return zhipuSource(provider, result);
     }
-    if (deps.readMagpie && canReadMagpieUsage(provider) && hasMagpieModels(provider)) {
+    if (deps.readMagpie && canReadMagpieUsage(provider)) {
       const result = await safe(`magpie:${provider.id}`, () => deps.readMagpie!(provider.id), null);
-      if (result?.status === 'unsupported') return paygSource(provider);
-      return magpieSource(provider, result, deps.nowMs);
+      if (result?.integration === 'magpie' && result.status !== 'unsupported') {
+        return magpieSource(provider, result, deps.nowMs);
+      }
+      return paygSource(provider);
     }
     return paygSource(provider);
   });
