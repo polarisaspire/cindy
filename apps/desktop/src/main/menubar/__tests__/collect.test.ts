@@ -1108,17 +1108,24 @@ describe('magpie quota collection', () => {
     expect(magpieSource(magpieProvider, { status: 'unavailable', integration: 'magpie', error: 'auth' }, NOW).windows).toEqual([]);
   });
 
-  it('collects only discovered Magpie connections and falls back to payg when unsupported', async () => {
-    const readMagpie = vi.fn<NonNullable<MenubarCollectDeps['readMagpie']>>(async () => ({
-      status: 'ready', integration: 'magpie', stale: false,
-      snapshot: {
-        kind: 'magpie-quota', fetchedAt: NOW,
-        accounts: [{ readAt: NOW - 10_000, error: false, windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 68, resetsAt: NOW + 7200_000 }] }],
-      },
-    }));
+  it('discovers Magpie user API connections even without discoveredSource and falls back to payg when unsupported', async () => {
+    const restartedMagpie = provider({
+      id: 'magpie-restarted', name: 'Magpie', source: 'user', auth: { method: 'apiKey' }, access: { kind: 'api' },
+      routing: { pi: { upstream: 'https://gateway.example.test/v1', authStrategy: 'api-key-header' } },
+      models: { pi: [{ id: 'agy-cli/gemini-4-neon', name: 'Neon', contextWindow: 1000, efforts: [], defaultEffort: null }] },
+    } as Partial<ProviderView> & { id: string });
+    const readMagpie = vi.fn<NonNullable<MenubarCollectDeps['readMagpie']>>(async (providerId) => providerId === 'magpie-restarted'
+      ? {
+          status: 'ready', integration: 'magpie', stale: false,
+          snapshot: {
+            kind: 'magpie-quota', fetchedAt: NOW,
+            accounts: [{ readAt: NOW - 10_000, error: false, windows: [{ name: 'Gemini · 7 days', pool: 'gemini', remaining: 68, resetsAt: NOW + 7200_000 }] }],
+          },
+        }
+      : { status: 'unsupported' });
     const collected = await collectMenubarInputs({
       nowMs: NOW,
-      listProviders: async () => [magpieProvider, plainApi],
+      listProviders: async () => [restartedMagpie, plainApi],
       readMagpie,
       readCodex: async () => null,
       readClaude: async () => null,
@@ -1129,13 +1136,13 @@ describe('magpie quota collection', () => {
       sessionRow: async () => null,
       selfDeviceName: 'Win',
     });
-    expect(readMagpie.mock.calls).toEqual([['v-magpie']]);
-    expect(collected.sources.map(s => [s.id, s.kind])).toEqual([['v-magpie', 'subscription'], ['plain-api', 'payg']]);
+    expect(readMagpie.mock.calls).toEqual([['magpie-restarted'], ['plain-api']]);
+    expect(collected.sources.map(s => [s.id, s.kind])).toEqual([['magpie-restarted', 'subscription'], ['plain-api', 'payg']]);
 
-    const fallback = await collectMenubarInputs({
+    const failed = await collectMenubarInputs({
       nowMs: NOW,
-      listProviders: async () => [magpieProvider],
-      readMagpie: async () => ({ status: 'unsupported' }),
+      listProviders: async () => [restartedMagpie],
+      readMagpie: async () => ({ status: 'unavailable', integration: 'magpie', error: 'auth' }),
       readCodex: async () => null,
       readClaude: async () => null,
       readXai: async () => null,
@@ -1145,6 +1152,6 @@ describe('magpie quota collection', () => {
       sessionRow: async () => null,
       selfDeviceName: 'Win',
     });
-    expect(fallback.sources.map(s => [s.id, s.kind])).toEqual([['v-magpie', 'payg']]);
+    expect(failed.sources.map(s => [s.id, s.kind])).toEqual([['magpie-restarted', 'subscription']]);
   });
 });

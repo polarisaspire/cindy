@@ -37,7 +37,9 @@ async function quotaWindows() {
   const build = await overview.fresh(QUOTA_WAIT_MS);
   const byProvider = new Map<string, (ModelGroupTraceQuota & { scopedTo?: string | null })[]>();
   for (const source of build?.input.sources ?? []) {
-    if (source.kind !== 'subscription' || (source.device && source.lastSeenAtMs != null)) continue;
+    // Magpie tubes aggregate multiple upstream pools/accounts for panel display;
+    // model-groups routes per-model pools with `meteredQuota: true` via `readLocalMagpieUsage`.
+    if (source.kind !== 'subscription' || source.family === 'magpie' || (source.device && source.lastSeenAtMs != null)) continue;
     // 分享来源在总览里的 id 就是它的运行位置 `share:<shareId>`。
     const location = source.shared ? source.id : source.device?.id;
     byProvider.set(modelGroupQuotaKey(location, source.providerId), source.windows.map((window) => ({

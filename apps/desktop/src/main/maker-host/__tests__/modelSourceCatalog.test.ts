@@ -27,6 +27,8 @@ describe('model source projection after a process restart', () => {
     expect(modelOf(restarted).discoveredSource).toBeUndefined();
     expect(modelOf(restarted).userModelConfig?.discoveredSource).toBeUndefined();
     expect(modelOf(restarted).opaqueModelId).toBe(true);
+    expect(restarted.hasPersistedMagpieModels(persisted.id, 'pi')).toBe(true);
+    expect(restarted.hasPersistedMagpieModels(persisted.id, 'claude-code')).toBe(false);
     expect(diskSnapshot.runtimes.pi!.models[0].discoveredSource?.providerId).toBe('Account A');
 
     const refreshedSources = await import('../model-source-snapshots');

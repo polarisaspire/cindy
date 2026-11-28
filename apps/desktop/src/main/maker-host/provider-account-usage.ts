@@ -19,7 +19,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { canReadMagpieUsage, hasMagpieModels, magpieQuotaEndpoint, parseMagpieQuota } from '../../shared/magpieUsage.js';
+import { canReadMagpieUsage, parseMagpieQuota } from '../../shared/magpieUsage.js';
 import { readMagpieAccountUsage, resetMagpieAccountUsage } from './magpie-account-usage.js';
 
 import type { AgentKind, Provider } from '@cindy/model-providers';
@@ -110,6 +110,13 @@ export interface ProviderAccountUsageResolution {
 type ProviderReader = (providerId: string) => Provider | undefined;
 type KeyReader = (providerId: string, agent: AgentKind) => string | null;
 type OwnerStampReader = () => { dataOwnerId: string | null; generation: number };
+type MagpieKnownChecker = (providerId: string, agent: AgentKind, endpoint: string) => boolean;
+type MagpieVerifiedRecorder = (
+  providerId: string,
+  agent: AgentKind,
+  endpoint: string,
+  isCurrent: () => boolean,
+) => boolean | void | Promise<boolean | void>;
 
 let oauthReader: KeyReader = () => null;
 let prepareOAuth: (providerId: string) => Promise<void> = async () => {};
@@ -121,6 +128,9 @@ export function setAccountUsageOAuthReader(read: KeyReader, prepare: typeof prep
 let providerReader: ProviderReader = () => undefined;
 let keyReader: KeyReader = () => null;
 let ownerStampReader: OwnerStampReader = () => ({ dataOwnerId: null, generation: 0 });
+let magpieKnownChecker: MagpieKnownChecker = () => false;
+let magpieVerifiedRecorder: MagpieVerifiedRecorder = () => {};
+const magpieVerifiedListeners = new Set<() => void>();
 let fetchImpl: typeof fetch = globalThis.fetch;
 
 /** host 注册期接通真实目录读取（active-catalog）。 */
@@ -136,6 +146,23 @@ export function setAccountUsageKeyReader(reader: KeyReader): void {
 /** host 注册期接通账号身份戳（缓存隔离用）。 */
 export function setAccountUsageOwnerStampReader(reader: OwnerStampReader): void {
   ownerStampReader = reader;
+}
+
+/** host 注册期接通已确认 Magpie 路由的持久化标记读取与回写。 */
+export function setAccountUsageMagpieStore(store: {
+  isKnown: MagpieKnownChecker;
+  markVerified: MagpieVerifiedRecorder;
+}): void {
+  magpieKnownChecker = store.isKnown;
+  magpieVerifiedRecorder = store.markVerified;
+}
+
+/** 订阅新确认的 Magpie 路由持久化事件，供托盘等背景视图刷新。 */
+export function observeMagpieVerified(listener: () => void): () => void {
+  magpieVerifiedListeners.add(listener);
+  return () => {
+    magpieVerifiedListeners.delete(listener);
+  };
 }
 
 /** host 注入统一出站 fetch；测试注入离线替身。 */
@@ -699,6 +726,9 @@ export function resetProviderAccountUsageForTest(): void {
   providerReader = () => undefined;
   keyReader = () => null;
   ownerStampReader = () => ({ dataOwnerId: null, generation: 0 });
+  magpieKnownChecker = () => false;
+  magpieVerifiedRecorder = () => {};
+  magpieVerifiedListeners.clear();
   fetchImpl = globalThis.fetch;
   accountUsageNow = Date.now;
 }
@@ -750,36 +780,48 @@ function callMagpieAccountUsage(
   ownerStamp: ReturnType<OwnerStampReader>,
   epoch: number,
   ownerCurrent: () => boolean,
+  options?: { knownOnly?: boolean },
 ): Promise<ProviderAccountUsageResult> {
+  const isCurrent = () => ownerCurrent() && epoch === kimiMutationEpoch;
   return readMagpieAccountUsage(request, {
     provider,
     owner: [ownerStamp, epoch],
     now: accountUsageNow,
-    current: () => ownerCurrent() && epoch === kimiMutationEpoch,
+    current: isCurrent,
     key: agent => keyReader(request.providerId, agent),
     read: (endpoint, key) => fetchAccountJson({ endpoint }, `Bearer ${key}`, parseMagpieQuota),
     error: error => error instanceof AccountUsageRequestError ? { code: error.code, retryAt: error.retryAt } : { code: 'network' },
+    knownOnly: options?.knownOnly,
+    isKnown: (agent, endpoint) => magpieKnownChecker(request.providerId, agent, endpoint),
+    onVerified: (agent, endpoint) => {
+      void Promise.resolve(magpieVerifiedRecorder(request.providerId, agent, endpoint, isCurrent))
+        .then((changed) => {
+          if (changed === true && isCurrent()) {
+            for (const listener of [...magpieVerifiedListeners]) {
+              try { listener(); } catch { /* ignore listener failure */ }
+            }
+          }
+        })
+        .catch(() => undefined);
+    },
   });
 }
 
-/** Select a local Magpie gateway route with discovered Magpie models, never probing arbitrary API keys. */
+/**
+ * Read Magpie gateway quota for the background tray/quota panel, skipping official integrations
+ * and unconfirmed custom API connections. Only routes confirmed as Magpie — via live or persisted
+ * model-discovery metadata, or a prior verified `/v1/magpie/quotas` response for the same route
+ * endpoint — are queried, so plain custom API providers never receive periodic quota probes.
+ */
 export async function readMagpieProviderAccountUsage(request: ProviderAccountUsageRequest): Promise<ProviderAccountUsageResult> {
   const provider = providerReader(request.providerId);
-  if (!canReadMagpieUsage(provider)) return { status: 'unsupported' };
-  const agents = request.agent ? [request.agent] : PROVIDER_ACCOUNT_USAGE_AGENTS;
-  let matched = false;
-  for (const agent of agents) {
-    if (!hasMagpieModels(provider, agent)) continue;
-    const route = provider?.routing[agent];
-    if (!route || route.disabled || !magpieQuotaEndpoint(route.upstream)) continue;
-    matched = true;
-    if (!keyReader(request.providerId, agent)?.trim()) continue;
-    const ownerStamp = ownerStampReader();
-    const epoch = kimiMutationEpoch;
-    const config = JSON.stringify(provider);
-    const ownerCurrent = () => JSON.stringify(ownerStampReader()) === JSON.stringify(ownerStamp)
-      && JSON.stringify(providerReader(request.providerId)) === config;
-    return callMagpieAccountUsage({ ...request, agent }, provider, ownerStamp, epoch, ownerCurrent);
+  if (!canReadMagpieUsage(provider) || providerAccountUsageSupported(request.providerId)) {
+    return { status: 'unsupported' };
   }
-  return matched ? { status: 'unavailable', integration: 'magpie', error: 'no-credentials' } : { status: 'unsupported' };
+  const ownerStamp = ownerStampReader();
+  const epoch = kimiMutationEpoch;
+  const config = JSON.stringify(provider);
+  const ownerCurrent = () => JSON.stringify(ownerStampReader()) === JSON.stringify(ownerStamp)
+    && JSON.stringify(providerReader(request.providerId)) === config;
+  return callMagpieAccountUsage(request, provider, ownerStamp, epoch, ownerCurrent, { knownOnly: true });
 }

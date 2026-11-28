@@ -11,6 +11,12 @@ interface Context {
   now(): number;
   read(endpoint: string, key: string, agent: AgentKind): Promise<MagpieQuotaSnapshot>;
   error(error: unknown): { code: ProviderAccountUsageError; retryAt?: number };
+  /** When true, only query routes already confirmed as Magpie (no blind probing of plain custom APIs). */
+  knownOnly?: boolean;
+  /** Additional persisted confirmation for a specific `(agent, endpoint)` route. */
+  isKnown?(agent: AgentKind, endpoint: string): boolean;
+  /** Called after a live response confirms `(agent, endpoint)` serves Magpie quota. */
+  onVerified?(agent: AgentKind, endpoint: string): void;
 }
 const cache = new Map<string, { result: ProviderAccountUsageResult; verified: boolean; expiresAt: number; retryAt: number; attemptedAt: number }>();
 const pending = new Map<string, Promise<ProviderAccountUsageResult>>();
@@ -23,12 +29,15 @@ export function resetMagpieAccountUsage(): void { cache.clear(); pending.clear()
 export async function readMagpieAccountUsage(request: ProviderAccountUsageRequest, ctx: Context): Promise<ProviderAccountUsageResult> {
   if (!canReadMagpieUsage(ctx.provider)) return { status: 'unsupported' };
   const attempted = new Set<string>();
+  let anyKnown = hasMagpieModels(ctx.provider, request.agent);
   for (const agent of request.agent ? [request.agent] : PROVIDER_ACCOUNT_USAGE_AGENTS) {
-    const known = hasMagpieModels(ctx.provider, agent);
     const route = ctx.provider?.routing[agent];
     if (!route || route.disabled) continue;
     const endpoint = magpieQuotaEndpoint(route.upstream);
     if (!endpoint) continue;
+    const known = hasMagpieModels(ctx.provider, agent) || ctx.isKnown?.(agent, endpoint) === true;
+    if (known) anyKnown = true;
+    if (ctx.knownOnly && !known) continue;
     const credential = ctx.key(agent)?.trim();
     if (!credential) continue;
     const target = createHash('sha256').update(JSON.stringify([endpoint, credential])).digest('hex');
@@ -65,6 +74,7 @@ export async function readMagpieAccountUsage(request: ProviderAccountUsageReques
           ? result.snapshot.accounts.flatMap(account => account.windows.map(window => window.resetsAt)).filter((reset): reset is number => reset !== null && reset > time) : [];
         const ttl = result.status === 'unavailable' || (result.status === 'ready' && result.stale) ? 15_000 : 300_000;
         if (!cache.has(identity) && cache.size >= MAX_CACHED) cache.delete(cache.keys().next().value!);
+        if (result.status === 'ready') ctx.onVerified?.(agent, endpoint);
         cache.set(identity, { result, verified: known || old?.verified === true || result.status === 'ready', attemptedAt: time, expiresAt: Math.min(time + ttl, ...resets), retryAt });
         return result;
       })();
@@ -77,5 +87,5 @@ export async function readMagpieAccountUsage(request: ProviderAccountUsageReques
     if (result.status === 'unsupported') continue;
     return result;
   }
-  return hasMagpieModels(ctx.provider, request.agent) ? { status: 'unavailable', integration: 'magpie', error: 'no-credentials' } : { status: 'unsupported' };
+  return anyKnown ? { status: 'unavailable', integration: 'magpie', error: 'no-credentials' } : { status: 'unsupported' };
 }

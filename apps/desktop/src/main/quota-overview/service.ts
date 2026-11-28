@@ -51,7 +51,7 @@ import { createLogger } from '../logger.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { readPluginHarnessUsage } from '../cindy-brain/pluginHarnesses.js';
 import { listPluginEngineViews, onPluginEnginesChanged } from '../maker-ipc/pluginEnginesIpc.js';
-import { readKimiCodingAccountUsage, readMagpieProviderAccountUsage, readOpenCodeGoAccountUsage, readZhipuCodingPlanAccountUsage } from '../maker-host/provider-account-usage.js';
+import { observeMagpieVerified, readKimiCodingAccountUsage, readMagpieProviderAccountUsage, readOpenCodeGoAccountUsage, readZhipuCodingPlanAccountUsage } from '../maker-host/provider-account-usage.js';
 import { getSessionProvider, hasSessionProvider } from '../maker-host/session-provider-store.js';
 import {
   readClaudeSubscriptionUsageSnapshotForDeviceLink,
@@ -351,6 +351,7 @@ export class QuotaOverviewService {
     this.usageOwnerId = getActiveAppSession().dataOwnerId;
     this.disposers.push(
       observeUsageChanges(() => this.scheduleRebuild()),
+      observeMagpieVerified(() => this.scheduleRebuild()),
       onSubscriptionAccountsChanged(() => {
         this.accountsRevision += 1;
         this.scheduleRebuild();
